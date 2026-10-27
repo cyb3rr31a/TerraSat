@@ -1,0 +1,45 @@
+"""One entry point for every audit, whatever the profile:
+
+    pin -> mosaic -> SAM (profile prompts) -> context layers -> analyzer -> result
+
+Used by scripts/run_audit.py now and the FastAPI endpoint next.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+from backend.app.profiles.loader import Profile, load_profile
+from backend.app.services.analyzers import AnalysisContext, AnalysisResult, run_analyzer
+from backend.app.services.layers import load_layers
+from backend.app.services.sam_service import (Detection, MetaSAMBackend, SegmentationBackend,
+                                              segment_mosaic_cached)
+from backend.app.services.tiles import Mosaic, TileCache, build_mosaic
+
+BackendFactory = Callable[[Mosaic], SegmentationBackend]
+
+
+@dataclass
+class AuditOutput:
+    profile: Profile
+    mosaic: Mosaic
+    detections: list[Detection]
+    result: AnalysisResult
+
+
+def run_audit(profile_id: str, lon: float, lat: float, *,
+              backend_factory: Optional[BackendFactory] = None,
+              layers: Optional[dict[str, list[dict]]] = None,
+              side_m: Optional[float] = None, zoom: Optional[int] = None,
+              params: Optional[dict] = None, tile_cache: Optional[TileCache] = None,
+              sam_cache_dir: Optional[Path] = None) -> AuditOutput:
+    profile = load_profile(profile_id)
+    mosaic = build_mosaic(lon, lat, side_m or profile.audit.side_m, zoom or profile.audit.zoom,
+                          tile_cache)
+    backend = backend_factory(mosaic) if backend_factory else MetaSAMBackend()
+    dets = segment_mosaic_cached(mosaic, backend, profile.sam_classes(), cache_dir=sam_cache_dir)
+    if layers is None:
+        layers = load_layers(profile.layers, mosaic.bounds)
+    ctx = AnalysisContext(dets, layers, mosaic.bounds, (lon, lat), params or {})
+    return AuditOutput(profile, mosaic, dets, run_analyzer(profile, ctx))
