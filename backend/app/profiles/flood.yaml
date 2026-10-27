@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Audit profile: Urban Flood Exposure & Drainage Watch  (DEMO CASE STUDY)
+# A profile tells the TerraSat engine what to look for in the imagery (SAM
+# prompts), which map layers to load, which spatial rules to apply and how to
+# write the memo. New use cases = new profile files, not new code.
+# ---------------------------------------------------------------------------
+id: flood
+name: Urban Flood Exposure & Drainage Watch
+tagline: Who is exposed, where will water back up, and what are residents seeing?
+status: case_study          # case_study | beta | planned
+audience: Ward disaster officers, Nairobi County, Kenya Red Cross
+
+audit:
+  side_m: 2100              # square analysed around the pin
+  zoom: 18                  # ~0.6 m/px
+
+classes:                    # one short noun phrase per SAM prompt
+  building: {prompts: [rooftop], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
+  garbage:  {prompts: [garbage pile], color: "#FF3D00", min_area_m2: 4, max_area_m2: 20000}
+  drainage: {prompts: [drainage ditch], color: "#FFC400", min_area_m2: 4, max_area_m2: 50000}
+  water:    {prompts: [river], color: "#2979FF", min_area_m2: 10, max_area_m2: 500000}
+
+layers: [osm_waterways]
+
+analyzer: flood_exposure
+params:
+  riparian_buffer_m: 30     # configurable; reported legal range 6-30 m - cite source
+  persons_per_structure: null
+
+memo:
+  framing: >-
+    Protection, not enforcement. Recommend evacuation priorities, drains to
+    clear before the peak rains and relief staging points. Never frame
+    structures as targets for demolition.
+  sections: [Risk summary, Top drains to clear, Evacuation priority zones, Relief staging points]
+  languages: [en, sw]

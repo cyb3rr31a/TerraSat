@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Audit profile: Solar & Mini-grid Planning  (second profile - proves the
+# engine generalises; shown briefly in the demo video)
+# Rings follow the original spec: 600 m KPLC/REREC transformer & mini-grid
+# eligibility zone, 1 km WISP / community Wi-Fi sector.
+# ---------------------------------------------------------------------------
+id: solar_minigrid
+name: Solar & Mini-grid Planning
+tagline: How many homes are unserved, how close is the grid, and what does it cost per household?
+status: beta
+audience: Utility planners, mini-grid developers, WISPs, county energy offices
+
+audit:
+  side_m: 2100
+  zoom: 18
+
+classes:
+  building:    {prompts: [rooftop], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
+  solar_panel: {prompts: [solar panel], color: "#00E676", min_area_m2: 0.5, max_area_m2: 2000}
+  water_tank:  {prompts: [water tank], color: "#FFC400", min_area_m2: 0.5, max_area_m2: 100}
+
+layers: [osm_power_lines]
+
+analyzer: solar_minigrid
+params:
+  rings_m: {transformer_zone: 600, wisp_sector: 1000}
+  households_per_building: 1.0
+  capex_usd: {minigrid_15kw: 25000, wisp_mast: 3500}
+  grid_near_m: 600          # LV/MV line within this distance of the pin = grid extension candidate
+  dense_min_buildings: 100  # buildings inside 600 m to count as "dense"
+
+memo:
+  framing: >-
+    Decision support for electrification and connectivity: grid extension vs
+    mini-grid vs standalone solar, with cost per unserved household.
+  sections: [Site summary, Grid proximity, Unit economics, Recommendation]
+  languages: [en]
