@@ -13,6 +13,7 @@ import httpx
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 NAIROBI_BBOX = (-1.45, 36.65, -1.15, 37.10)  # south, west, north, east
+DEMO_BBOX = (-1.39, 36.77, -1.24, 36.95)     # just the demo sites: lighter queries for roads / power lines
 RAW = Path(__file__).resolve().parents[1] / "data" / "raw"
 
 # layer -> (output file, Overpass selectors, tags to keep)
