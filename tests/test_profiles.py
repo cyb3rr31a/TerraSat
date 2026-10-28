@@ -67,7 +67,7 @@ def test_solar_minigrid_rings_economics_verdict():
 
 
 def test_same_engine_runs_both_profiles(tmp_path):
-    cache = TileCache(root=tmp_path / "tiles", fetcher=fake_fetcher([]))
+    cache = TileCache(root=tmp_path / "tiles", fetcher=fake_fetcher([]), provider="mapbox")
     for pid in ("flood", "solar_minigrid"):
         prof = load_profile(pid)
         roof = prof.classes["building"].prompts[0]

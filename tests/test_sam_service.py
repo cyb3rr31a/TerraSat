@@ -18,7 +18,7 @@ def lonlat_square(gx, gy, size_px, zoom):
 
 
 def make_scene(tmp_path):
-    cache = TileCache(root=tmp_path / "tiles", fetcher=fake_fetcher([]))
+    cache = TileCache(root=tmp_path / "tiles", fetcher=fake_fetcher([]), provider="mapbox")
     m = build_mosaic(*MATHARE, side_m=2100, zoom=18, cache=cache)
     houses = []
     # a regular grid of 15 px (~9 m) houses every 97 px across the whole mosaic,
