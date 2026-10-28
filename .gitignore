@@ -9,3 +9,4 @@ node_modules/
 .streamlit/secrets.toml
 data/outputs/
 .pytest_cache/
+issues/
