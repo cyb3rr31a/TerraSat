@@ -16,6 +16,7 @@ pyproj>=3.6
 geopandas>=0.14
 mercantile>=1.2
 meta-sam-parser>=0.1.0
+overturemaps>=1.0
 streamlit>=1.35
 folium>=0.16
 streamlit-folium>=0.20

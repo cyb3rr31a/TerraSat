@@ -23,6 +23,16 @@ pin / voice ─► satellite mosaic ─► SAM 3.1 (profile prompts) ─► map 
 | `muse-spark-1.3` | Parses reports, ranks priorities and writes the profile's memo with live web-search citations |
 | `muse-voice-transcribe-1.0` | In-app voice reports and voice commands |
 
+## Apps
+
+| App | For | What it does |
+|---|---|---|
+| **TerraSat mobile** (Expo / React Native, `mobile/`, *in progress*) | **Residents** | Record a voice report (GPS + photo attached), works offline and sends later, track your report from received → verified → crew assigned → cleared |
+| | **Field crews** | See assigned drains and choke points, navigate there, mark them cleared with a photo |
+| **TerraSat dashboard** (React web app, `dashboard/`, *in progress*) | County / Red Cross monitoring and logistics teams | Audit map and layers, use-case switcher, live report feed, choke-point ranking, assign crews and track tasks, grounded memo, exports |
+
+Both apps use the same FastAPI backend.
+
 ## What TerraSat can do
 
 The core toolchain is voice commands, SAM 3.1 segmentation on Mapbox imagery, spatial rules, and a Muse Spark memo grounded in web search. **Every idea below reuses the same pipeline: drop a pin, segment, apply a spatial rule, write a grounded memo, export.** Only the prompts and the rule change.
@@ -93,7 +103,7 @@ params:
 
 1. Copy a profile YAML and change it.
 2. If the metrics are new, register an analyzer in `backend/app/services/analyzers.py`.
-3. If a new map layer is needed, add it to `scripts/fetch_osm_layers.py` and `backend/app/services/layers.py`.
+3. If a new map layer is needed, add it to `scripts/fetch_data.py` and `backend/app/services/layers.py`.
 
 ## Setup (Windows, Anaconda Prompt)
 
@@ -102,7 +112,7 @@ cd C:\hackathons\terrasat
 conda create -n terrasat python=3.11 -y
 conda activate terrasat
 pip install -r requirements.txt
-copy .env.example .env    &REM then add META_API_KEY and MAPBOX_TOKEN
+copy .env.example .env
 ```
 
 - **Meta key:** [dev.meta.ai](https://dev.meta.ai/) → API keys.
@@ -111,34 +121,39 @@ copy .env.example .env    &REM then add META_API_KEY and MAPBOX_TOKEN
 
 ## Run
 
-```bat
-python scripts\smoke_test_meta.py sam                        &REM 1 SAM call (~$0.0025) -> data\outputs\smoke\
-python scripts\smoke_test_meta.py spark                      &REM 1 Muse Spark + web search call
-python scripts\fetch_osm_layers.py                           &REM waterways, power lines, roads -> data\raw\
-python scripts\run_audit.py --profile flood --preset mathare  &REM flood case study (~64 SAM calls, cached)
-python scripts\run_audit.py --profile solar_minigrid --preset syokimau
-python scripts\run_audit.py --profile flood --offline         &REM no network: fake tiles + mock SAM
-uvicorn backend.app.main:app --reload                        &REM API docs at http://127.0.0.1:8000/docs
-python -m pytest -q                                          &REM tests
-```
+Run these from the project folder (`C:\hackathons\terrasat`):
 
-Each audit writes `mosaic.jpg`, `overlay.png`, `audit.geojson` and `summary.json` to `data\outputs\<profile>_<place>\`.
+| Command | What it does |
+|---|---|
+| `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap) and building footprints (Overture Maps) to `data/raw/`; skips what you already have |
+| `python scripts/run_audit.py --profile flood --preset mathare` | Runs a full audit; results in `data/outputs/<profile>_<place>/` |
+| `python scripts/run_audit.py --profile solar_minigrid --preset syokimau` | Same engine, solar & mini-grid profile |
+| `python scripts/run_audit.py --profile flood --offline` | Runs without internet (fake imagery + mock SAM) |
+| `python scripts/check.py mapbox` | Checks the Mapbox token |
+| `python scripts/check.py sam` / `spark` | One live call to SAM 3.1 / Muse Spark with web search |
+| `python scripts/check.py voice --audio data/voice/english.m4a` | Transcribes a voice note (any format) |
+| `python scripts/check.py prompts --classes building,garbage --zoom 19` | Compares SAM prompt wordings on real imagery |
+| `uvicorn backend.app.main:app --reload` | Starts the API; docs at http://127.0.0.1:8000/docs |
+| `python -m pytest -q` | Runs the tests |
+
+SAM calls are cached, so repeating a run costs nothing. Imagery comes from the Mapbox Static Images API (`TILE_PROVIDER=mapbox_static`); `esri` is a no-key fallback for development.
 
 ## Project layout
 
 ```
 backend/app/
-  main.py                 FastAPI (GET /profiles; POST /audit next)
+  main.py                 FastAPI (GET /profiles; next: /audit, /reports, /tasks)
+  core/config.py          settings from .env
   profiles/*.yaml         audit profiles: one file per use case
   profiles/loader.py      profile schema + validation
-  services/audit.py       run_audit(profile, lon, lat): the whole pipeline
-  services/tiles.py       Mapbox tile grid, stitching, cache
-  services/sam_service.py SAM 3.1 backend, mask parsing, window dedup, overlays
-  services/geo.py         tile math, pixel↔GPS, UTM, buffers, polygon NMS
-  services/layers.py      OSM context layers
-  services/analyzers.py   metrics per profile (flood_exposure, solar_minigrid)
-  services/exposure.py    riparian exposure helpers
-scripts/                  fetch_osm_layers, run_audit, smoke_test_meta
+  services/audit.py       run_audit(profile, lon, lat): the whole pipeline + demo sites
+  services/tiles.py       satellite imagery: fetch, stitch, cache
+  services/sam_service.py SAM 3.1 calls, mask parsing, window dedup, overlays
+  services/geo.py         tile maths, pixel to GPS, UTM, buffers
+  services/layers.py      map layers (OSM, building footprints)
+  services/analyzers.py   metrics per profile (flood exposure, solar & mini-grid)
+  services/audio.py       converts voice notes to WAV for transcription
+scripts/                  fetch_data.py, run_audit.py, check.py
 tests/                    pytest suite
 docs/SPEC.md              full specification and roadmap
 ```
@@ -146,7 +161,7 @@ docs/SPEC.md              full specification and roadmap
 ## Status
 
 - **Working:**
-  - imagery pipeline;
+  - imagery pipeline (Mapbox Static Images API);
   - SAM 3.1 integration (official `meta-sam-parser`);
   - dedup across windows;
   - flood exposure and solar/mini-grid analyzers;
@@ -154,18 +169,26 @@ docs/SPEC.md              full specification and roadmap
   - tests.
 - **Next:**
   - first live runs;
-  - elevation (low-lying ground) layer;
-  - `/audit` endpoint;
+  - `/audit`, `/reports` and `/tasks` endpoints;
   - drainage choke points;
+  - elevation (low-lying ground) layer;
   - Muse Spark memo;
-  - in-app voice reports;
-  - React dashboard.
+  - mobile app (resident and crew modes);
+  - web dashboard.
+
+## Working with issues
+
+Planned work is tracked as GitHub issues, grouped into milestones **M1 Live pipeline → M2 Backend API → M3 Mobile app → M4 Dashboard → M5 Demo & submission**.
+
+- Mention the issue number in commit messages, e.g. `feat(reports): voice report pipeline (#5)`.
+- Put `Closes #5` in the commit message (or pull request) when the work is done; GitHub closes the issue when it reaches `main`.
+- New ideas or bugs: use the **Feature** or **Bug** template on GitHub's "New issue" page.
 
 ## Data and attribution
 
 - **Imagery:** © Mapbox, © Maxar and other providers.
 - **Map data:** © OpenStreetMap contributors (ODbL).
-- **Building baseline:** Google Open Buildings (CC BY 4.0).
+- **Building footprints:** Overture Maps Foundation (includes Google Open Buildings, Microsoft and OpenStreetMap data; ODbL / CDLA).
 - **Elevation:** Copernicus GLO-30.
 - **Segmentation:** SAM 3.1 by Meta, used under the SAM License. Mask parsing uses `meta-sam-parser`.
 
