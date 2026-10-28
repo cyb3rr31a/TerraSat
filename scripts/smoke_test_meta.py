@@ -2,8 +2,8 @@
 
     python scripts/smoke_test_meta.py sam            # 1 SAM call on a Mathare window (~$0.0025)
     python scripts/smoke_test_meta.py spark          # 1 Muse Spark call with web search
-    python scripts/smoke_test_meta.py voice --audio path/to/clip.m4a
-    python scripts/smoke_test_meta.py all --audio path/to/clip.m4a
+    python scripts/smoke_test_meta.py voice --wav path/to/clip.wav
+    python scripts/smoke_test_meta.py all --wav path/to/clip.wav
 
 SAM needs MAPBOX_TOKEN too (or pass --image some_aerial.jpg).
 """
@@ -57,9 +57,6 @@ def test_sam(image_path, prompt):
         d.polygon(mk.polygon, fill=(0, 229, 255, 110), outline=(0, 229, 255, 255))
     Image.alpha_composite(over, layer).convert("RGB").save(OUT / "sam_overlay.jpg")
     print(f"[SAM] saved {OUT / 'sam_overlay.jpg'} and the raw text for inspection")
-    confs = sorted(mk.score for mk in masks)
-    return {"instances": len(masks), "seconds": round(dt, 1),
-            "median_confidence": confs[len(confs) // 2] if confs else None}
 
 
 def test_spark():
@@ -90,29 +87,21 @@ def test_spark():
     print("[Spark] answer:", " ".join(text)[:800])
     print("[Spark] citations:", cites[:5])
     print("[Spark] usage:", data.get("usage"))
-    return {"web_searches": searches, "citations": len(cites), "answer": " ".join(text)[:400]}
 
 
-def test_voice(audio):
-    """Any recording works (m4a from a phone, mp3, wav...): it is converted to
-    16 kHz mono WAV first, as the API requires."""
-    if not audio:
-        print("[Voice] skipped - pass --audio path/to/clip (m4a, mp3, wav...)")
-        return None
-    from backend.app.services.audio import file_to_wav
-    wav = file_to_wav(audio)
+def test_voice(wav):
+    if not wav:
+        print("[Voice] skipped - pass --wav path/to/clip.wav (WAV only)")
+        return
     req = {"model": "muse-voice-transcribe-1.0", "audioEncoding": "WAV", "mode": "PUSH_TO_TALK"}
-    files = {"request": (None, json.dumps(req), "application/json"),
-             "audio": ("clip.wav", wav, "audio/wav")}
-    t = time.time()
-    r = httpx.post(f"{BASE}/asr/transcribe", files=files,
-                   headers={**HEADERS, "Accept": "application/json"}, timeout=180)
+    with open(wav, "rb") as f:
+        files = {"request": (None, json.dumps(req), "application/json"),
+                 "audio": (Path(wav).name, f, "audio/wav")}
+        t = time.time()
+        r = httpx.post(f"{BASE}/asr/transcribe", files=files,
+                       headers={**HEADERS, "Accept": "application/json"}, timeout=180)
     print(f"[Voice] HTTP {r.status_code} in {time.time() - t:.1f}s")
     print("[Voice] response:", r.text[:1000])
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "voice_response.txt").write_text(f"HTTP {r.status_code}\n{r.text}", encoding="utf-8")
-    r.raise_for_status()
-    return r.text
 
 
 def main():
@@ -120,7 +109,7 @@ def main():
     ap.add_argument("which", choices=["sam", "spark", "voice", "all"])
     ap.add_argument("--image")
     ap.add_argument("--prompt", default="rooftop")
-    ap.add_argument("--audio", "--wav", dest="audio", help="any audio file (m4a, mp3, wav...)")
+    ap.add_argument("--wav")
     a = ap.parse_args()
     check_key()
     if a.which in ("sam", "all"):
@@ -128,7 +117,7 @@ def main():
     if a.which in ("spark", "all"):
         test_spark()
     if a.which in ("voice", "all"):
-        test_voice(a.audio)
+        test_voice(a.wav)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,7 @@ from pathlib import Path
 
 import httpx
 
-OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",          # main server
-                 "https://overpass.kumi.systems/api/interpreter"]  # mirror, used if the main one fails
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 NAIROBI_BBOX = (-1.45, 36.65, -1.15, 37.10)  # south, west, north, east
 RAW = Path(__file__).resolve().parents[1] / "data" / "raw"
 
@@ -21,12 +20,12 @@ LAYERS = {
     "waterways": ("nairobi_waterways.geojson",
                   ['way["waterway"~"^(river|stream|canal|drain|ditch)$"]', 'way["natural"="water"]'],
                   ["waterway", "natural", "name", "tunnel"]),
-    "roads": ("nairobi_roads.geojson",
-              ['way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|track)$"]'],
-              ["highway", "surface", "name", "bridge"]),
     "power_lines": ("nairobi_power_lines.geojson",
                     ['way["power"~"^(line|minor_line|cable)$"]'],
                     ["power", "voltage", "name", "operator"]),
+    "roads": ("nairobi_roads.geojson",
+              ['way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|track)$"]'],
+              ["highway", "surface", "name", "bridge"]),
 }
 
 
@@ -57,19 +56,9 @@ def to_geojson(osm, keep):
 
 def fetch(layer, bbox, client):
     fname, selectors, keep = LAYERS[layer]
-    last = None
-    for url in OVERPASS_URLS:
-        try:
-            r = client.post(url, data={"data": build_query(selectors, bbox)})
-            r.raise_for_status()
-            osm = r.json()
-            break
-        except (httpx.HTTPError, ValueError) as e:  # busy server or bad JSON: try the mirror
-            last = e
-            print(f"  {url} failed ({e.__class__.__name__}); trying next server...")
-    else:
-        raise RuntimeError(f"All Overpass servers failed for {layer}: {last}")
-    gj = to_geojson(osm, keep)
+    r = client.post(OVERPASS_URL, data={"data": build_query(selectors, bbox)})
+    r.raise_for_status()
+    gj = to_geojson(r.json(), keep)
     RAW.mkdir(parents=True, exist_ok=True)
     (RAW / fname).write_text(json.dumps(gj))
     print(f"{layer}: {len(gj['features'])} features -> data/raw/{fname}")
@@ -84,10 +73,7 @@ def main():
         for layer in a.layers or list(LAYERS):
             if layer not in LAYERS:
                 raise SystemExit(f"Unknown layer {layer!r}; choose from {list(LAYERS)}")
-            try:
-                fetch(layer, a.bbox, c)
-            except RuntimeError as e:  # a busy server shouldn't block the other layers
-                print(f"{layer}: FAILED - {e}. Run again later: python scripts/fetch_osm_layers.py {layer}")
+            fetch(layer, a.bbox, c)
 
 
 if __name__ == "__main__":
