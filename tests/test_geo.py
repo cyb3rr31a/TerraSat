@@ -75,3 +75,15 @@ def test_block_mask_does_not_swallow_buildings():
     houses = [box(10, 10, 20, 20), box(50, 50, 60, 60)]
     keep = geo.merge_duplicates(houses + [block], [0.9, 0.9, 0.5])
     assert 0 in keep and 1 in keep
+
+
+def test_fill_depressions_and_flow():
+    import numpy as np
+    z = np.add.outer(np.arange(20.0), np.zeros(20))   # slope: rows get higher going south
+    z[10, 10] -= 3                                     # a 3 m pit; it spills over its 9 m neighbour
+    filled = geo.fill_depressions(z)
+    depth = filled - z
+    assert 1.9 < depth[10, 10] < 2.1 and depth[2, 2] < 0.01  # ponds 2 m deep; the slope doesn't pond
+    acc = geo.flow_accumulation(filled)
+    assert acc[0].sum() == z.size                      # everything drains to the low (north) edge
+    assert acc[19].max() == 1                          # top row receives nothing

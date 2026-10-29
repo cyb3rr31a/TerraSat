@@ -173,3 +173,49 @@ def test_flood_2024_comparison():
     assert s["unosat_affected_structures"] == 2
     assert s["affected_within_riparian_zone_pct"] == 50.0
     assert 85 < s["observed_pct_of_area"] < 95  # the cloud hides ~7% of the square
+
+
+def valley_dem():
+    """A river valley along LAT: ground rises 1 m per 10 m away from the river, with a dip."""
+    import numpy as np
+    from backend.app.services.layers import Dem
+    dx = 10 * M
+    n = 241
+    rows = np.abs(np.arange(n) - n // 2)[:, None] * 1.0 + np.zeros((1, n))  # metres above river
+    rows[60:63, 150:153] -= 4                                                 # a pond-shaped dip ~600 m north
+    return Dem(1600 + rows, LON - n // 2 * dx, LAT + n // 2 * dx + dx / 2, dx, dx)
+
+
+def test_terrain_and_risk_score():
+    river = {"type": "Feature", "properties": {"waterway": "river"},
+             "geometry": mapping(LineString([(LON - 1200 * M, LAT), (LON + 1200 * M, LAT)]))}
+    riverside, uphill, in_dip = det("building", 0, 15), det("building", 0, 500), det("building", 300, 600)
+    s = run_analyzer(load_profile("flood"), AnalysisContext(
+        [riverside, uphill, in_dip], {"osm_waterways": [river], "copernicus_dem": valley_dem()},
+        BOUNDS, (LON, LAT), {})).summary
+    assert riverside.props["height_above_stream_m"] <= 3 and riverside.props["risk"] == "high"
+    assert uphill.props["height_above_stream_m"] > 40 and uphill.props["risk"] == "low"
+    assert in_dip.props["in_dip"] is True
+    assert s["risk"]["high"] == 1 and s["terrain"]["buildings_low_lying"] == 1
+
+
+def test_2024_damage_by_risk_class():
+    river = {"type": "Feature", "properties": {"waterway": "river"},
+             "geometry": mapping(LineString([(LON - 1200 * M, LAT), (LON + 1200 * M, LAT)]))}
+    dets = [det("building", 0, 15), det("building", 0, 500), det("building", 200, 500)]
+    unosat = [{"type": "Feature", "properties": {"kind": "affected_structure"}, "geometry": mapping(Point(LON, LAT + 15 * M))}]
+    s = run_analyzer(load_profile("flood"), AnalysisContext(
+        dets, {"osm_waterways": [river], "copernicus_dem": valley_dem(), "unosat_2024": unosat},
+        BOUNDS, (LON, LAT), {})).summary["flood_2024"]["by_risk_class"]
+    assert s["high"] == {"buildings_pct": 33.3, "damaged_pct": 100.0}
+    assert s["damaged_not_matched_to_a_building"] == 0
+
+
+def test_dem_channels_used_where_no_river_is_mapped():
+    riverside = det("building", 0, 15)
+    s = run_analyzer(load_profile("flood"), AnalysisContext(
+        [riverside], {"osm_waterways": [], "copernicus_dem": valley_dem()}, BOUNDS, (LON, LAT),
+        {"channel_min_ha": 1})).summary
+    assert riverside.props["watercourse"] == "dem_channel"
+    assert riverside.props["distance_to_river_m"] <= 30 and riverside.props["risk"] == "high"
+    assert s["terrain"]["buildings_measured_to_dem_channels"] == 1
