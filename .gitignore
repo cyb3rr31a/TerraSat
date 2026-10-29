@@ -5,5 +5,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 node_modules/
-# downloads, caches, outputs and voice notes (recreate with scripts/fetch_data.py)
 data/
