@@ -1,0 +1,23 @@
+name: Bug
+description: Something in TerraSat isn't working
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Command or steps, e.g. python scripts/run_audit.py --profile flood --preset mathare
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output
+      description: Paste the error. Remove any API keys or tokens first.
+      render: text

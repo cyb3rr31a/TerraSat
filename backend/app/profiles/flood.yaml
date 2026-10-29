@@ -14,18 +14,32 @@ audit:
   side_m: 2100              # square analysed around the pin
   zoom: 18                  # ~0.6 m/px
 
+# Live tests on Mathare (Oct 28): "building" found the most roofs (95 vs 13 for
+# "rooftop"), but no prompt found the dense informal roofs, even at zoom 19, so
+# the buildings_baseline layer fills those gaps. No prompt found drains, rivers
+# or garbage from above: waterways come from OpenStreetMap; garbage comes from
+# citizen reports (kept here in case a better prompt turns up).
 classes:                    # one short noun phrase per SAM prompt
-  building: {prompts: [rooftop], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
-  garbage:  {prompts: [garbage pile], color: "#FF3D00", min_area_m2: 4, max_area_m2: 20000}
-  drainage: {prompts: [drainage ditch], color: "#FFC400", min_area_m2: 4, max_area_m2: 50000}
-  water:    {prompts: [river], color: "#2979FF", min_area_m2: 10, max_area_m2: 500000}
+  building: {prompts: [building], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
+  garbage:  {prompts: [garbage], color: "#FF3D00", min_area_m2: 4, max_area_m2: 20000}
 
-layers: [osm_waterways]
+layers: [osm_waterways, buildings_baseline, unosat_2024, copernicus_dem]
 
 analyzer: flood_exposure
 params:
   riparian_buffer_m: 30     # configurable; reported legal range 6-30 m - cite source
   persons_per_structure: null
+  # Flood risk per building. Tuned on UNOSAT's 2024 damage at Mukuru, checked on
+  # holdout sites (Korogocho, east Nairobi) - results in docs/SPEC.md.
+  # The 2024 flood extent is not an input, so it can still check the score.
+  risk_rules:
+    high:   [{within_m: 30}, {within_m: 60, below_m: 1}]    # metres from / above the river
+    medium: [{within_m: 60}, {within_m: 100, below_m: 3}]
+  channel_min_ha: 200       # drainage lines from the DEM: at least this much land drains through...
+  channel_fallback_m: 500   # ...used where no mapped river is within this distance
+  low_lying_m: 3            # for the terrain summary
+  dip_depth_m: 0.5          # surface-water flag: water would pond at least this deep...
+  flow_path_min_ha: 5       # ...or at least this much land drains through the spot
 
 memo:
   framing: >-

@@ -1,0 +1,36 @@
+name: Feature
+description: A new capability for TerraSat (engine, profile, app or dashboard)
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should TerraSat be able to do, and for whom?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [backend, ml (SAM / Muse Spark / voice), data / map layers, mobile app, dashboard, infra]
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Audit profile
+      options: [all profiles / engine, flood (case study), solar & mini-grid, new profile]
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      value: |
+        - [ ]
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know it's done?
+    validations:
+      required: true
