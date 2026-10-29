@@ -125,7 +125,7 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 
 | Command | What it does |
 |---|---|
-| `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap) and building footprints (Overture Maps) to `data/raw/`; skips what you already have |
+| `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap), building footprints (Overture Maps) and elevation (Copernicus GLO-30) to `data/raw/`, and cuts the UNOSAT 2024 flood mapping to each site (download `FL20240426KEN_SHP.zip` from HDX into `data/raw/flood_2024/` first); skips what you already have |
 | `python scripts/run_audit.py --profile flood --preset mathare` | Runs a full audit; results in `data/outputs/<profile>_<place>/` |
 | `python scripts/run_audit.py --profile solar_minigrid --preset syokimau` | Same engine, solar & mini-grid profile |
 | `python scripts/run_audit.py --profile flood --offline` | Runs without internet (fake imagery + mock SAM) |
@@ -190,6 +190,7 @@ Planned work is tracked as GitHub issues, grouped into milestones **M1 Live pipe
 - **Map data:** © OpenStreetMap contributors (ODbL).
 - **Building footprints:** Overture Maps Foundation (includes Google Open Buildings, Microsoft and OpenStreetMap data; ODbL / CDLA).
 - **Elevation:** Copernicus GLO-30.
+- **2024 flood mapping:** UNITAR-UNOSAT, FL20240426KEN (CC BY-SA), via the Humanitarian Data Exchange.
 - **Segmentation:** SAM 3.1 by Meta, used under the SAM License. Mask parsing uses `meta-sam-parser`.
 
 ## Responsible use
