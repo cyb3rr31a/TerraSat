@@ -6,6 +6,7 @@ Used by scripts/run_audit.py now and the FastAPI endpoint next.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -14,7 +15,7 @@ from backend.app.profiles.loader import Profile, load_profile
 from backend.app.services.analyzers import AnalysisContext, AnalysisResult, run_analyzer
 from backend.app.services.layers import load_layers
 from backend.app.services.sam_service import (Detection, MetaSAMBackend, SegmentationBackend,
-                                              segment_mosaic_cached)
+                                              render_overlay, segment_mosaic_cached)
 from backend.app.services.tiles import Mosaic, TileCache, build_mosaic
 
 BackendFactory = Callable[[Mosaic], SegmentationBackend]
@@ -54,3 +55,14 @@ def run_audit(profile_id: str, lon: float, lat: float, *,
         layers = load_layers(profile.layers, mosaic.bounds)
     ctx = AnalysisContext(dets, layers, mosaic.bounds, (lon, lat), params or {})
     return AuditOutput(profile, mosaic, dets, run_analyzer(profile, ctx))
+
+
+def save_audit(out: AuditOutput, folder: Path) -> dict:
+    """Write mosaic.jpg, overlay.png, audit.geojson and summary.json; return what a UI needs."""
+    folder.mkdir(parents=True, exist_ok=True)
+    meta = out.mosaic.save(folder / "mosaic")
+    render_overlay(out.mosaic, out.detections, out.profile.sam_classes()).save(folder / "overlay.png")
+    (folder / "audit.geojson").write_text(json.dumps(out.result.geojson))
+    info = {"profile": out.profile.id, "bounds": meta["bounds"], "summary": out.result.summary}
+    (folder / "summary.json").write_text(json.dumps(info, indent=2))
+    return info
