@@ -138,11 +138,25 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 
 SAM calls are cached, so repeating a run costs nothing. Imagery comes from the Mapbox Static Images API (`TILE_PROVIDER=mapbox_static`); `esri` is a no-key fallback for development.
 
+## API
+
+Start it with `uvicorn backend.app.main:app --reload`; interactive docs at http://127.0.0.1:8000/docs.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /profiles`, `GET /presets` | Use cases and demo sites |
+| `POST /audit` | Run an audit for a profile at a preset or lon/lat; cached, returns summary + GeoJSON / overlay URLs |
+| `POST /reports` | A resident's voice note (any audio format) + GPS + optional photo -> transcript, issue type, place, urgency, EN/SW summary, corroboration against river distance, height and 2024 floods |
+| `GET /reports`, `PATCH /reports/{id}` | Report feed (filter by status, device or time) and status updates |
+| `GET /crews`, `POST /tasks`, `GET /tasks`, `PATCH /tasks/{id}` | Assign reports to crews; crews mark tasks en route / cleared with an after photo |
+
+Report statuses: `corroborated` / `unconfirmed` -> `assigned` -> `cleared` (or `dismissed`). Data is stored in `data/terrasat.db` (SQLite) and `data/media/`.
+
 ## Project layout
 
 ```
 backend/app/
-  main.py                 FastAPI (GET /profiles; next: /audit, /reports, /tasks)
+  main.py                 FastAPI endpoints (audits, reports, crews, tasks)
   core/config.py          settings from .env
   profiles/*.yaml         audit profiles: one file per use case
   profiles/loader.py      profile schema + validation
@@ -153,6 +167,8 @@ backend/app/
   services/layers.py      map layers (OSM, building footprints)
   services/analyzers.py   metrics per profile (flood exposure, solar & mini-grid)
   services/audio.py       converts voice notes to WAV for transcription
+  services/meta.py        Muse Voice transcription and Muse Spark calls
+  services/reports.py     citizen reports and crew tasks (SQLite)
 scripts/                  fetch_data.py, run_audit.py, check.py
 tests/                    pytest suite
 docs/SPEC.md              full specification and roadmap
