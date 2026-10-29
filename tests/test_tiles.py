@@ -67,7 +67,7 @@ def test_static_provider_url_and_alignment(tmp_path):
     cache = TileCache(root=tmp_path, fetcher=fake_static_fetcher(calls), provider="mapbox_static",
                       token="pk.test")
     m = build_mosaic(*MATHARE, side_m=2100, zoom=18, cache=cache)
-    assert len(calls) <= 16  # ~9-16 static images instead of ~196 raster tiles
+    assert len(calls) <= 16  # 9-16 static images instead of ~196 raster tiles
     gx, gy = geo.lonlat_to_global_px(*MATHARE, 18)
     tx = int(gx // 1280)
     r, g, b = m.image.getpixel((int(gx - m.box.x0), int(gy - m.box.y0)))
