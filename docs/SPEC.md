@@ -129,11 +129,19 @@ Kenya Met puts an 81% chance on this year's El Niño being *very strong*, with a
     - At Mukuru, distance to the river was the strongest predictor of 2024 damage. Damage rates were 35% within 15 m, 22% at 15–30 m, 9% at 30–60 m, 2% at 60–100 m, and 0% beyond 100 m.
     - Height above the river added to it near the river.
     - Treating dips and flow paths as risk points diluted the river signal, so they became a separate flag.
-  - **Mukuru result** (calibration site, so optimistic):
-    - **high = 7% of buildings, 79% of damaged structures;**
-    - high + medium = 15% of buildings, 96% of damage;
-    - low = 85% of buildings, 3.5% of damage.
-  - **Holdout check:** the rules are being tested on two sites not used for tuning, Korogocho and an eastern cluster far from mapped rivers.
+  - **Unmapped watercourses:** where OSM maps no river within 500 m, distance and height are measured to **drainage lines derived from the DEM** (≥ 200 ha draining through). Each building records `watercourse: osm | dem_channel`.
+  - **Results against UNOSAT's 2024 damage** (share of all damaged structures; final rules, Oct 29):
+
+    | Site | Role | High: buildings → damage | High + medium | Low |
+    |---|---|---|---|---|
+    | Mukuru | calibration | **9% → 79%** | 19% → 96% | 81% → 3.5% |
+    | Korogocho | holdout | **6% → 65%** | 18% → 69% | 82% → 0% |
+    | East Nairobi | holdout, no mapped river | **6% → 26%** | 14% → 57% | 86% → 38% |
+
+  - **Notes on the results:**
+    - **Korogocho:** 105 of the 341 damaged structures have no building in today's footprint map, which is consistent with homes demolished along the river after the floods. Of those still on the map, 93% are rated high and none low.
+    - **East Nairobi:** without DEM drainage lines, every building there was rated low, so the river rules catch nothing at all there.
+    - **What this means:** the river rules work well near mapped rivers. Away from them, the DEM fallback helps but surface-water flooding remains the weak spot (30 m elevation that includes roofs).
 - **Building inventory = SAM + baseline** (decided after the live tests on Oct 28):
   - SAM 3.1 (prompt `building`) finds formal buildings well, but misses most roofs in dense informal settlements, even at zoom 19.
   - Building footprints from **Overture Maps** (which include Google Open Buildings) fill those gaps.
@@ -317,8 +325,8 @@ Swap any site with poor imagery.
 | Tue Oct 27 | ✅ Scaffold. ✅ geo, tiles, SAM 3.1 backend (real API format via `meta-sam-parser`), dedup, flood exposure. ✅ **Audit profiles** (flood + solar_minigrid), layer and analyzer registries, `audit.py`, `/profiles` endpoint, OSM layer fetcher, smoke-test script. 29 tests passing. |
 | Tue Oct 27 (later) | ✅ Imagery switched to the Mapbox Static Images API (Raster Tiles is disabled on the account). ✅ Decision: Expo mobile app (residents + crews) plus a web dashboard. |
 | Wed Oct 28 | ✅ Milestone 1: live checks, first live Mathare audit, prompt tests (SAM misses informal roofs → Overture footprints fill the gaps; 1,665 structures in the Mathare riparian zone). ✅ Scripts consolidated to `fetch_data.py`, `run_audit.py`, `check.py`. |
-| Thu Oct 29 | `POST /audit`. SQLite + `POST/GET /reports` (WAV conversion → transcribe → parse → geocode → SAM check). Choke-point ranking. DEM low-lying layer. |
-| Fri Oct 30 | `reasoning.py`: Muse Spark memo (EN/SW, citations), exports. `/tasks` crew logistics API. |
+| Thu Oct 29 | ✅ Terrain (height above river, dips, flow paths, DEM drainage lines), risk rules validated on 2024 damage at three sites. ✅ **API:** `/audit` (cached), `/reports` (voice → WAV → Muse Voice → Muse Spark parse with Nairobi place names → corroboration against river distance, height and 2024 floods), `/crews`, `/tasks` (the full loop from resident to crew to cleared), SQLite. |
+| Fri Oct 30 | Muse Spark memo (EN/SW, citations), flood history layer (news incidents via web search + the Interior Ministry's list of at-risk areas), choke points, exports. |
 | Sat Oct 31 | **Mobile app, resident mode:** record, GPS, photo, offline queue, my reports and status. |
 | Sun Nov 1 | **Mobile app, crew mode:** assigned tasks, map and navigation, mark cleared with a photo. Nearby-risk view. |
 | Mon Nov 2 | **Web dashboard:** map and layers, use-case switcher, report feed, task board, memo panel. |
