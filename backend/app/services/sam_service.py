@@ -142,14 +142,17 @@ class MetaSAMBackend:
     max_workers = 8  # windows processed in parallel (team limit is 3,000 RPM)
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None,
-                 model: str = "sam-3.1", timeout: float = 120, retries: int = 3,
-                 min_confidence: float = 0.0):
+                 model: str = "sam-3.1", timeout: float = 120, retries: int = 5,
+                 min_confidence: float = 0.0, cache_dir: Optional[Path] = None):
         self.api_key = api_key or settings.meta_api_key
         self.base_url = (base_url or settings.meta_api_base_url or "https://api.meta.ai/v1").rstrip("/")
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.min_confidence = min_confidence
+        # every raw reply is saved, so a re-run after a network error only
+        # repeats the calls that failed (and costs nothing for the rest)
+        self.cache_dir = Path(cache_dir or settings.cache_dir / "sam_calls")
 
     # -- request -----------------------------------------------------------
     def payload(self, image: Image.Image, prompt: str) -> dict:
@@ -165,7 +168,17 @@ class MetaSAMBackend:
         }
 
     def call(self, image: Image.Image, prompt: str) -> str:
-        """Return the raw SAM output text for one image + one prompt."""
+        """Return the raw SAM output text for one image + one prompt (cached)."""
+        key = hashlib.sha1(image.tobytes() + prompt.encode()).hexdigest()[:24]
+        path = self.cache_dir / f"{key}.txt"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        text = self._request(image, prompt)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return text
+
+    def _request(self, image: Image.Image, prompt: str) -> str:
         if not self.api_key:
             raise RuntimeError("META_API_KEY is not set (see .env.example)")
         import httpx

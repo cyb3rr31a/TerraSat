@@ -19,6 +19,17 @@ from backend.app.services.tiles import Mosaic, TileCache, build_mosaic
 
 BackendFactory = Callable[[Mosaic], SegmentationBackend]
 
+# Demo sites (lon, lat). Flood sites sit on the river (checked against OSM, Oct 28).
+PRESETS = {
+    "mathare": (36.8594, -1.2625),   # Mathare River
+    "mukuru": (36.8789, -1.3102),    # Ngong River
+    "kibera": (36.7887, -1.3146),    # Motoine River
+    # holdout sites to test the flood risk rules (densest 2024 damage clusters in UNOSAT's data)
+    "korogocho": (36.8855, -1.2455),
+    "east_cluster": (37.0375, -1.2835),  # eastern Nairobi, far from mapped rivers: surface-water test
+    "syokimau": (36.9300, -1.3700),  # solar & mini-grid profile
+}
+
 
 @dataclass
 class AuditOutput:

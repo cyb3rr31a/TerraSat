@@ -10,11 +10,13 @@ Conventions
 """
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Sequence
 
+import numpy as np
 from pyproj import Transformer
 from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -74,10 +76,12 @@ def square_around(lon: float, lat: float, side_m: float, zoom: int) -> PixelBox:
                     math.ceil(cx + half), math.ceil(cy + half), zoom)
 
 
-def tiles_covering(pb: PixelBox) -> list[tuple[int, int, int]]:
-    """XYZ tiles (z, x, y) needed to cover a pixel box."""
-    tx0, ty0 = int(pb.x0 // TILE_SIZE), int(pb.y0 // TILE_SIZE)
-    tx1, ty1 = int((pb.x1 - 1) // TILE_SIZE), int((pb.y1 - 1) // TILE_SIZE)
+def tiles_covering(pb: PixelBox, tile_size: int = TILE_SIZE) -> list[tuple[int, int, int]]:
+    """Tiles (z, x, y) of `tile_size` px needed to cover a pixel box. With the
+    default 256 these are standard XYZ tiles; larger sizes are "virtual" tiles
+    fetched as single static images."""
+    tx0, ty0 = int(pb.x0 // tile_size), int(pb.y0 // tile_size)
+    tx1, ty1 = int((pb.x1 - 1) // tile_size), int((pb.y1 - 1) // tile_size)
     return [(pb.zoom, x, y) for y in range(ty0, ty1 + 1) for x in range(tx0, tx1 + 1)]
 
 
@@ -194,3 +198,55 @@ def pixelbox_to_lonlat_bounds(pb: PixelBox) -> tuple[float, float, float, float]
     w, n = global_px_to_lonlat(pb.x0, pb.y0, pb.zoom)
     e, s = global_px_to_lonlat(pb.x1, pb.y1, pb.zoom)
     return w, s, e, n
+
+
+# ------------------------------------------------------------ terrain grids
+_D8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+
+def fill_depressions(z: np.ndarray, eps: float = 1e-3) -> np.ndarray:
+    """Priority-flood (Barnes et al. 2014): raise every pit to the level at
+    which water would spill out, plus a tiny slope (eps per cell) so flats
+    still drain. `filled - z` is how deep water would pond."""
+    h, w = z.shape
+    filled = z.astype(float).copy()
+    seen = np.zeros(z.shape, bool)
+    heap = []
+    for r in range(h):
+        for c in range(w):
+            if r in (0, h - 1) or c in (0, w - 1):
+                heap.append((filled[r, c], r, c))
+                seen[r, c] = True
+    heapq.heapify(heap)
+    while heap:
+        e, r, c = heapq.heappop(heap)
+        for dr, dc in _D8:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < h and 0 <= cc < w and not seen[rr, cc]:
+                seen[rr, cc] = True
+                filled[rr, cc] = max(filled[rr, cc], e + eps)
+                heapq.heappush(heap, (filled[rr, cc], rr, cc))
+    return filled
+
+
+def flow_accumulation(filled: np.ndarray) -> np.ndarray:
+    """D8 flow accumulation: how many cells drain through each cell
+    (including itself). Expects a depression-filled grid."""
+    h, w = filled.shape
+    padded = np.pad(filled, 1, constant_values=np.inf)
+    best = np.zeros((h, w))
+    receiver = np.full((h, w), -1)
+    idx = np.arange(h * w).reshape(h, w)
+    pidx = np.pad(idx, 1, constant_values=-1)
+    for dr, dc in _D8:
+        nb = padded[1 + dr:1 + dr + h, 1 + dc:1 + dc + w]
+        drop = (filled - nb) / math.hypot(dr, dc)
+        better = drop > best
+        best[better] = drop[better]
+        receiver[better] = pidx[1 + dr:1 + dr + h, 1 + dc:1 + dc + w][better]
+    acc = np.ones(h * w)
+    rec = receiver.ravel()
+    for i in np.argsort(-filled.ravel(), kind="stable"):
+        if rec[i] >= 0:
+            acc[rec[i]] += acc[i]
+    return acc.reshape(h, w)
