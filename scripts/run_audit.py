@@ -21,10 +21,16 @@ from shapely.geometry import LineString, box, mapping  # noqa: E402
 
 from backend.app.profiles.loader import list_profile_ids, load_profile  # noqa: E402
 from backend.app.services import geo  # noqa: E402
-from backend.app.services.audit import PRESETS, run_audit  # noqa: E402
+from backend.app.services.audit import run_audit  # noqa: E402
 from backend.app.services.sam_service import MockBackend, render_overlay  # noqa: E402
 from backend.app.services.tiles import TileCache  # noqa: E402
 
+PRESETS = {  # approximate centres; adjust after viewing real imagery
+    "mathare": (36.8580, -1.2615),
+    "mukuru": (36.8790, -1.3100),
+    "kibera": (36.7870, -1.3130),
+    "syokimau": (36.9300, -1.3700),
+}
 
 
 def offline_tiles(z, x, y):
@@ -85,7 +91,7 @@ def main():
     kw = {}
     if a.offline:
         kw["backend_factory"], kw["layers"] = synthetic(profile, lon, lat)
-        kw["tile_cache"] = TileCache(root=ROOT / "data" / "cache" / "tiles_offline", fetcher=offline_tiles, provider="mapbox")
+        kw["tile_cache"] = TileCache(root=ROOT / "data" / "cache" / "tiles_offline", fetcher=offline_tiles)
         kw["sam_cache_dir"] = ROOT / "data" / "cache" / "sam_offline"
 
     print(f"TerraSat audit | profile: {profile.name} | place: {place}")
