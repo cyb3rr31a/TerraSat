@@ -28,8 +28,6 @@ from backend.app.services.audit import PRESETS  # noqa: E402
 from backend.app.services.sam_service import MetaSAMBackend, parse_sam_output  # noqa: E402
 from backend.app.services.tiles import build_mosaic  # noqa: E402
 
-BASE = (settings.meta_api_base_url or "https://api.meta.ai/v1").rstrip("/")
-HEADERS = {"Authorization": f"Bearer {settings.meta_api_key}"}
 OUT = ROOT / "data" / "outputs" / "checks"
 
 # Prompt candidates, with results of the Oct 28 tests on Mathare in comments
@@ -74,31 +72,20 @@ def check_sam(prompt="building"):
 
 
 def check_spark():
-    body = {"model": "muse-spark-1.3",
-            "input": "What is the Kenya Meteorological Department's latest forecast for the "
-                     "October-December 2026 short rains in Nairobi? Two sentences, cite sources.",
-            "tools": [{"type": "web_search", "user_location": {"type": "approximate", "country": "KE", "city": "Nairobi"}}]}
-    r = httpx.post(f"{BASE}/responses", json=body, headers=HEADERS, timeout=120)
-    r.raise_for_status()
-    data = r.json()
-    texts = [c for i in data.get("output", []) if i.get("type") == "message" for c in i.get("content", [])
-             if c.get("type") == "output_text"]
-    cites = [a["url"] for c in texts for a in c.get("annotations", []) if a.get("type") == "url_citation"]
-    searches = sum(i.get("type") == "web_search_call" for i in data.get("output", []))
-    print(f"Spark: {searches} web searches, {len(cites)} citations\n{' '.join(c['text'] for c in texts)[:600]}")
+    from backend.app.services.meta import spark
+    r = spark("What is the Kenya Meteorological Department's latest forecast for the "
+              "October-December 2026 short rains in Nairobi? Two sentences, cite sources.", web_search=True)
+    print(f"Spark: {r['web_searches']} web searches, {len(r['citations'])} citations\n{r['text'][:600]}")
 
 
 def check_voice(audio):
     """Any recording works (m4a, mp3, wav...): it's converted to 16 kHz mono WAV first."""
     from backend.app.services.audio import file_to_wav
-    req = {"model": "muse-voice-transcribe-1.0", "audioEncoding": "WAV", "mode": "PUSH_TO_TALK"}
-    files = {"request": (None, json.dumps(req), "application/json"),
-             "audio": ("clip.wav", file_to_wav(audio), "audio/wav")}
-    r = httpx.post(f"{BASE}/asr/transcribe", files=files,
-                   headers={**HEADERS, "Accept": "application/json"}, timeout=180)
+    from backend.app.services.meta import transcribe
+    text = transcribe(file_to_wav(audio))
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"voice_{Path(audio).stem}.txt").write_text(f"HTTP {r.status_code}\n{r.text}", encoding="utf-8")
-    print(f"Voice ({Path(audio).name}): HTTP {r.status_code}\n{r.text[:1000]}")
+    (OUT / f"voice_{Path(audio).stem}.txt").write_text(text, encoding="utf-8")
+    print(f"Voice ({Path(audio).name}): {text}")
 
 
 def check_prompts(classes, site="mathare", zoom=18, n_windows=3):

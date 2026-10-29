@@ -22,7 +22,7 @@ from shapely.geometry import LineString, box, mapping  # noqa: E402
 from backend.app.profiles.loader import list_profile_ids, load_profile  # noqa: E402
 from backend.app.services import geo  # noqa: E402
 from backend.app.services.audit import run_audit  # noqa: E402
-from backend.app.services.sam_service import MockBackend, render_overlay  # noqa: E402
+from backend.app.services.sam_service import MockBackend  # noqa: E402
 from backend.app.services.tiles import TileCache  # noqa: E402
 
 PRESETS = {  # approximate centres; adjust after viewing real imagery
@@ -99,10 +99,7 @@ def main():
     m = res.mosaic
     print(f"  mosaic {m.image.width}x{m.image.height} px at {geo.meters_per_pixel(lat, m.zoom):.2f} m/px, "
           f"{len(list(m.windows()))} windows, {len(res.detections)} detections")
-    m.save(out / "mosaic")
-    render_overlay(m, res.detections, profile.sam_classes()).save(out / "overlay.png")
-    (out / "audit.geojson").write_text(json.dumps(res.result.geojson))
-    (out / "summary.json").write_text(json.dumps(res.result.summary, indent=2))
+    save_audit(res, out)
     print(json.dumps(res.result.summary, indent=2))
     print(f"Saved to {out}")
 
