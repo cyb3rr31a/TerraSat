@@ -44,7 +44,7 @@ OSM_LAYERS = {
                     ["power", "voltage", "name", "operator"]),
 }
 ALL = [*OSM_LAYERS, "buildings", "terrain", "flood_2024"]
-FLOOD_SITES = ("mathare", "mukuru", "kibera")
+FLOOD_SITES = ("mathare", "mukuru", "kibera", "korogocho", "east_cluster")
 SITE_HALF_DEG = 0.0105  # ~1.2 km each way: covers the 2.1 km audit square
 
 
