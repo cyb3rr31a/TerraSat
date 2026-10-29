@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = ROOT / "data"
     cache_dir: Path = ROOT / "data" / "cache"
+    db_path: Path = ROOT / "data" / "terrasat.db"
 
 
 settings = Settings()
