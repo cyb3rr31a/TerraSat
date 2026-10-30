@@ -23,7 +23,7 @@ classes:                    # one short noun phrase per SAM prompt
   building: {prompts: [building], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
   garbage:  {prompts: [garbage], color: "#FF3D00", min_area_m2: 4, max_area_m2: 20000}
 
-layers: [osm_waterways, buildings_baseline, unosat_2024, copernicus_dem]
+layers: [osm_waterways, osm_roads, buildings_baseline, unosat_2024, copernicus_dem, flood_history]
 
 analyzer: flood_exposure
 params:
@@ -40,11 +40,19 @@ params:
   low_lying_m: 3            # for the terrain summary
   dip_depth_m: 0.5          # surface-water flag: water would pond at least this deep...
   flow_path_min_ha: 5       # ...or at least this much land drains through the spot
+  # Drainage choke points: where water must pass under a road (culvert or bridge).
+  # Ranked by land draining through, at-risk buildings nearby and residents' reports.
+  choke_points:
+    min_upstream_ha: 20     # flow paths smaller than this are ignored
+    merge_m: 60             # candidates closer than this are one place
+    near_m: 150             # buildings and reports counted within this distance
+    weights: {upstream: 0.4, buildings: 0.3, reports: 0.3}   # 3 reports of a blockage beat a big but quiet crossing
 
 memo:
   framing: >-
-    Protection, not enforcement. Recommend evacuation priorities, drains to
-    clear before the peak rains and relief staging points. Never frame
-    structures as targets for demolition.
-  sections: [Risk summary, Top drains to clear, Evacuation priority zones, Relief staging points]
+    Protection, not enforcement. Recommend which drains and crossings to clear
+    before the peak rains and where to warn and evacuate first. Never frame
+    structures as targets for demolition or eviction.
+  sections: [Risk summary, This week's rain outlook, Drains and crossings to clear first,
+             Where to warn and evacuate first, What residents are reporting, Data limits]
   languages: [en, sw]
