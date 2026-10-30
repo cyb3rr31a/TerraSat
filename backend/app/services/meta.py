@@ -51,10 +51,17 @@ def spark(prompt: str, web_search: bool = False, model: str = "muse-spark-1.3") 
     }
 
 
-def spark_json(prompt: str, **kw) -> dict:
-    """Ask Muse Spark for a JSON object and parse it (tolerates text or code fences around it)."""
-    text = spark(prompt + "\n\nReply with only a JSON object.", **kw)["text"]
+JSON_ONLY = "\n\nReply with only a JSON object."
+
+
+def parse_json(text: str) -> dict:
+    """The JSON object in a Muse Spark answer (tolerates text or code fences around it)."""
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
         raise ValueError(f"Muse Spark did not return JSON: {text[:200]}")
     return json.loads(match.group(0))
+
+
+def spark_json(prompt: str, **kw) -> dict:
+    """Ask Muse Spark for a JSON object and parse it."""
+    return parse_json(spark(prompt + JSON_ONLY, **kw)["text"])

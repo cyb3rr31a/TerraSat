@@ -19,6 +19,7 @@ from shapely.ops import nearest_points, unary_union
 
 from backend.app.core.config import settings
 from backend.app.services import audio, geo, meta
+from backend.app.services.analyzers import flood_2024_checker
 from backend.app.services.layers import load_dem, load_layer
 
 ISSUE_TYPES = ["blocked_drain", "flooding", "river_overflow", "garbage", "collapsed_bridge", "other"]
@@ -105,13 +106,12 @@ def corroborate(lon: float, lat: float, near_m: float = 100) -> dict:
             q = nearest_points(union, Point(lon, lat))[0]
             r, c = dem.cells([lon, q.x], [lat, q.y])
             ctx["height_above_watercourse_m"] = round(float(dem.z[r[0], c[0]] - dem.z[r[1], c[1]]), 1)
-    unosat = load_layer("unosat_2024", bounds)
-    pt = Point(lon, lat)
-    kind = lambda k: [shape(f["geometry"]) for f in unosat if f["properties"].get("kind") == k]
-    mapped = any(g.contains(pt) for g in kind("analysis_extent"))
-    under_cloud = any(g.contains(pt) for g in kind("cloud"))
-    if mapped and not under_cloud:  # None = the 2024 satellite image couldn't see this spot
-        ctx["in_2024_flood"] = any(g.buffer(0.0003).contains(pt) for g in kind("flood_extent"))
+    # None = the 2024 satellite image couldn't see this spot (cloud, or outside the mapping)
+    ctx["in_2024_flood"] = flood_2024_checker(load_layer("unosat_2024", bounds), near_m=30)(Point(lon, lat))
+    # past floods named in the news within 1 km: shown to officers, not part of the rule below
+    ctx["past_floods_nearby"] = [f"{f['properties']['place']} ({f['properties']['date']})"
+                                 for f in load_layer("flood_history", bounds)
+                                 if geo.to_utm(shape(f["geometry"])).distance(p_utm) <= 1000][:5]
     d, h = ctx["distance_to_watercourse_m"], ctx["height_above_watercourse_m"]
     ctx["corroborated"] = bool((d is not None and d <= near_m) or ctx["in_2024_flood"]
                                or (h is not None and h < 3 and d is not None and d <= 3 * near_m))

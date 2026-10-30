@@ -29,6 +29,9 @@ LAYER_FILES: dict[str, str] = {
     "unosat_2024": "flood_2024/sites",
     # Copernicus GLO-30 elevation tiles (GeoTIFF), downloaded by scripts/fetch_data.py
     "copernicus_dem": "terrain",
+    # Past flood incidents from news and official statements (Muse Spark web search),
+    # placed at neighbourhood level - evidence for memos and reports, not a score input
+    "flood_history": "nairobi_flood_history.geojson",
 }
 
 
@@ -40,7 +43,7 @@ def layer_path(name: str) -> Path:
 
 @lru_cache(maxsize=8)
 def _read(path: str) -> list[dict]:
-    return json.loads(Path(path).read_text())["features"]
+    return json.loads(Path(path).read_text(encoding="utf-8"))["features"]
 
 
 def load_layer(name: str, bounds: tuple[float, float, float, float],
