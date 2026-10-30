@@ -98,3 +98,54 @@ def test_2024_flag_is_unknown_under_cloud(monkeypatch):
     monkeypatch.setattr(reports, "load_layer", lambda name, bounds: unosat if name == "unosat_2024" else [])
     assert reports.corroborate(36.86, -1.26)["in_2024_flood"] is None       # hidden by cloud
     assert reports.corroborate(36.875, -1.26)["in_2024_flood"] is True      # seen, inside the flood
+
+
+def fake_audit(monkeypatch, tmp_path, audit_id="0123456789ab"):
+    """A saved audit with two choke points: a big river crossing and a small drain next to Mathare."""
+    import json
+    folder = tmp_path / "outputs" / "api" / audit_id
+    folder.mkdir(parents=True)
+    pt = lambda lon, lat, up, b: {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                                  "properties": {"class": "choke_point", "kind": "mapped", "upstream_ha": up,
+                                                 "buildings_at_risk_nearby": b, "road": "residential",
+                                                 "watercourse": "drain", "in_2024_flood": None}}
+    (folder / "audit.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [
+        pt(36.8700, -1.2700, 500, 10), pt(36.8594, -1.2626, 30, 10)]}))
+    (folder / "summary.json").write_text(json.dumps({"profile": "flood", "bounds": {"west": 36.85, "south": -1.28, "east": 36.88, "north": -1.25},
+                                                     "summary": {"risk": {"high": 5}}}))
+    monkeypatch.setattr(main, "DATA", tmp_path)
+    return audit_id
+
+
+def test_choke_points_rerank_with_reports_and_export(client, monkeypatch, tmp_path):
+    aid = fake_audit(monkeypatch, tmp_path)
+    before = client.get(f"/audit/{aid}/choke-points").json()
+    assert before[0]["upstream_ha"] == 500 and before[1]["reports_nearby"] == 0
+    for i in range(3):                     # residents report the blocked drain at Mathare
+        post_report(client, client_id=f"r{i}")
+    after = client.get(f"/audit/{aid}/choke-points").json()
+    drain = next(r for r in after if r["upstream_ha"] == 30)
+    assert drain["reports_nearby"] == 3 and drain["rank"] == 1
+    csv_text = client.get(f"/audit/{aid}/choke-points", params={"format": "csv"}).text
+    assert csv_text.startswith("rank,score,kind") and len(csv_text.strip().splitlines()) == 3
+    assert client.get("/reports", params={"format": "csv"}).text.count("blocked_drain") == 3
+    assert client.get("/audit/../../etc/choke-points").status_code == 404
+    assert client.get("/audit/ffffffffffff/choke-points").status_code == 404
+
+
+def test_memo_is_sourced_and_cached(client, monkeypatch, tmp_path):
+    from backend.app.services import audit
+    aid = fake_audit(monkeypatch, tmp_path)
+    post_report(client)
+    prompts = []
+    monkeypatch.setattr(audit.meta, "spark", lambda prompt, **kw: prompts.append((prompt, kw)) or {
+        "text": "## Risk summary\nClear the drain at rank 1 first (resident reports).",
+        "citations": [{"url": "https://meteo.go.ke/forecast", "title": "KMD 7-day forecast"}], "web_searches": 1})
+    m = client.post(f"/audit/{aid}/memo", params={"lang": "sw"}).json()
+    assert m["lang"] == "sw" and m["sources"][0]["url"] == "https://meteo.go.ke/forecast"
+    prompt, kw = prompts[0]
+    assert kw["web_search"] and "Kiswahili" in prompt and "blocked_drain" in prompt   # the report is in the data
+    assert "## Sources" in (tmp_path / "outputs" / "api" / aid / "memo_sw.md").read_text(encoding="utf-8")
+    client.post(f"/audit/{aid}/memo", params={"lang": "sw"})
+    assert len(prompts) == 1                                   # cached
+    assert client.post(f"/audit/{aid}/memo", params={"lang": "fr"}).status_code == 422

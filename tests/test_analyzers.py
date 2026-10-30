@@ -219,3 +219,23 @@ def test_dem_channels_used_where_no_river_is_mapped():
     assert riverside.props["watercourse"] == "dem_channel"
     assert riverside.props["distance_to_river_m"] <= 30 and riverside.props["risk"] == "high"
     assert s["terrain"]["buildings_measured_to_dem_channels"] == 1
+
+
+def test_choke_points_where_roads_cross_water():
+    from backend.app.services.analyzers import find_choke_points, flow_grids, rank_choke_points
+    line = lambda x0, y0, x1, y1, **props: {"type": "Feature", "properties": props, "geometry": mapping(
+        LineString([(LON + x0 * M, LAT + y0 * M), (LON + x1 * M, LAT + y1 * M)]))}
+    river = line(-1200, 0, 200, 0, waterway="river", name="Test River")   # mapped west of x=200 only
+    roads = [line(0, -400, 0, 400, highway="residential"),               # crosses the mapped river
+             line(500, -400, 500, 400, highway="tertiary")]              # crosses the valley, no river mapped
+    dem = valley_dem()
+    pts = find_choke_points(roads, [river], dem, flow_grids(dem)[1], [], [], BOUNDS,
+                            load_profile("flood").params, 32737)
+    kinds = {round((f["geometry"]["coordinates"][0] - LON) / M, -2): f["properties"]["kind"] for f in pts}
+    assert kinds == {0: "mapped", 500: "flow_path"}
+    assert all(f["properties"]["in_2024_flood"] is None for f in pts)  # no 2024 data = unknown
+    report = {"lon": LON + 500 * M, "lat": LAT + 20 * M, "issue_type": "blocked_drain", "status": "corroborated"}
+    before = {f["properties"]["kind"]: f["properties"]["score"] for f in pts}
+    after = {f["properties"]["kind"]: f for f in rank_choke_points(pts, [report], load_profile("flood").params)}
+    assert after["flow_path"]["properties"]["reports_nearby"] == 1
+    assert after["flow_path"]["properties"]["score"] > before["flow_path"]
