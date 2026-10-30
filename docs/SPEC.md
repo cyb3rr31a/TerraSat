@@ -158,11 +158,32 @@ Kenya Met puts an 81% chance on this year's El Niño being *very strong*, with a
   - **Mathare:** 68% of the square was under cloud, so it can't be validated.
   - **Kibera:** outside UNOSAT's analysis area.
 
-### F2: Drainage choke points *(to do)*
+### F2: Drainage choke points ✅
 
-- **Candidates:** road–waterway crossings, culverted sections, and SAM garbage or ditch detections near waterways.
-- **Ranking inputs:** built-up area upstream, garbage within 50 m, and citizen reports within 100 m.
-- **Output:** a ranked list of drains and culverts to clear.
+A choke point is where water has to pass under a road, through a culvert or under a bridge, and backs up when it blocks.
+
+- **Two kinds of candidate:**
+  - `mapped`: a road crosses a waterway in OpenStreetMap (rivers, streams, drains, ditches, plus footbridges);
+  - `flow_path`: a road crosses a flow path in the elevation data where nothing is mapped (often an unmapped drain). Found as a peak in upstream area along the road that falls away on both sides.
+- Candidates within 60 m are merged into one place.
+- **Score (0–1), weights set in `flood.yaml`:**
+  - 0.4 × land draining through, on a log scale;
+  - 0.3 × high- and medium-risk buildings within 150 m;
+  - 0.3 × residents' reports within 150 m (blocked drain, flooding, garbage, collapsed bridge; up to 3 count).
+- **Live re-ranking:** the ranking updates whenever new reports arrive (`GET /audit/{id}/choke-points`). Three reports of one blocked drain move it above a larger crossing nobody has reported.
+- **Check against 2024:** the 2024 flood is not part of the score, so it can test the ranking. Share of top-10 choke points inside the 2024 flood extent, compared with all choke points (only points the 2024 image could see):
+  - **Korogocho:** 90% vs 63%;
+  - **East cluster:** 100% vs 66%;
+  - **Mukuru:** 0% vs 0%. The Ngong River's crossings sit just outside the audit square, and footpaths weren't in the roads layer yet;
+  - **Mathare:** mostly hidden by cloud;
+  - **Kibera:** outside the 2024 mapping.
+
+### F2b: Flood history layer ✅
+
+- **Sources:** past floods named in news reports and official statements, covering the April–May 2024 long rains, the March 2026 flash floods and the Interior Ministry's at-risk list of March 2026.
+- **How it's built:** Muse Spark finds them with web search; Nominatim (OpenStreetMap's geocoder) places them at the named place (`python scripts/fetch_data.py flood_history`).
+- **Source check:** each item records whether its source URL is one Muse Spark actually opened (`source_verified`).
+- **Evidence only:** used in memos, audit summaries and report context ("past floods within 1 km"). It's left out of risk scores because news coverage favours places reporters reach, and places are only accurate to neighbourhood level.
 
 ### F3: Citizen reports and crew tasks (mobile app) *(to do)*
 
@@ -179,15 +200,21 @@ Kenya Met puts an 81% chance on this year's El Niño being *very strong*, with a
 - **Roadmap:** SMS, USSD and phone-call reporting, which work without mobile data.
 - **Other profiles:** the reporting flow is generic. In the solar profile the same flow would take outage reports.
 
-### F4: Grounded memo *(to do)*
+### F4: Grounded memo ✅
 
-Muse Spark receives the analyzer summary, recent reports, and web results (KMD forecasts, county notices, news). It writes the sections listed in the profile's `memo`. For flood that means a risk summary, top drains to clear, evacuation priority zones and relief staging points, in English and Swahili.
+- **Endpoint:** `POST /audit/{id}/memo?lang=en|sw`.
+- **Input to Muse Spark (with web search):** the audit summary, the live choke-point ranking, residents' reports in the area and past flood incidents.
+- **Sections:** risk summary, this week's rain outlook, drains and crossings to clear first, where to warn and evacuate first, what residents are reporting, and data limits.
+- **Weekly warning:** Muse Spark looks up the Kenya Meteorological Department's 7-day forecast, cites it, and says which places to warn first. This is the "warn these wards this week" stretch goal.
+- **Grounding and sources:** it uses only the given data and pages it cites. The sources (web citations plus past-incident URLs) are listed under the memo.
+- **Framing:** protection, not enforcement.
+- **Output:** saved as `memo_<lang>.md` next to the audit and cached until `refresh=true`.
 
-### F5: Exports
+### F5: Exports ✅
 
-- **GeoJSON** of all layers, for QGIS. Already produced by `run_audit.py`.
-- **CSV** priority list.
-- **Memo** as Markdown or PDF.
+- **GeoJSON** of all layers, for QGIS: `/outputs/api/<id>/audit.geojson`.
+- **CSV:** choke points (`/audit/{id}/choke-points?format=csv`) and reports (`/reports?format=csv`).
+- **Memo** as Markdown: `/outputs/api/<id>/memo_<lang>.md`.
 
 ## 4. Second profile: Solar & Mini-grid Planning (beta)
 
@@ -261,6 +288,8 @@ This fixes the original spec's flaw that "no solar panel" doesn't mean "unserved
 | `GET /reports` | Report feed for the dashboard (filter by status or area); a reporter's own reports for the mobile app |
 | `POST /tasks`, `PATCH /tasks/{id}` | Assign a choke point or report to a crew; status updates and after photos from the crew app |
 | `GET /tasks?crew=` | A crew's assigned tasks for the mobile app |
+| `GET /audit/{id}/choke-points` | Choke points ranked with the latest reports (`format=csv` to export) |
+| `POST /audit/{id}/memo` | Muse Spark memo with sources, `lang=en|sw` |
 
 **Storage:** SQLite for reports and tasks, and the filesystem for audio and photos.
 
@@ -282,7 +311,7 @@ stitch, cache      parse, dedup, cache   (waterways, power,    solar_minigrid, �
    └──────────── geo.py: tile math, pixel↔GPS, UTM, buffers, NMS ─────────┘
 
 profiles/*.yaml   ← one file per use case (what to find, layers, rules, memo)
-next: reasoning.py (Muse Spark memo) · reports.py (voice pipeline) · tasks.py (crew logistics) · chokepoints.py · export.py · db.py (SQLite)
+reports.py: voice pipeline, crews and tasks (SQLite) · audit.py: memo · analyzers.py: choke points
 ```
 
 **Rules**
@@ -326,7 +355,7 @@ Swap any site with poor imagery.
 | Tue Oct 27 (later) | ✅ Imagery switched to the Mapbox Static Images API (Raster Tiles is disabled on the account). ✅ Decision: Expo mobile app (residents + crews) plus a web dashboard. |
 | Wed Oct 28 | ✅ Milestone 1: live checks, first live Mathare audit, prompt tests (SAM misses informal roofs → Overture footprints fill the gaps; 1,665 structures in the Mathare riparian zone). ✅ Scripts consolidated to `fetch_data.py`, `run_audit.py`, `check.py`. |
 | Thu Oct 29 | ✅ Terrain (height above river, dips, flow paths, DEM drainage lines), risk rules validated on 2024 damage at three sites. ✅ **API:** `/audit` (cached), `/reports` (voice → WAV → Muse Voice → Muse Spark parse with Nairobi place names → corroboration against river distance, height and 2024 floods), `/crews`, `/tasks` (the full loop from resident to crew to cleared), SQLite. |
-| Fri Oct 30 | Muse Spark memo (EN/SW, citations), flood history layer (news incidents via web search + the Interior Ministry's list of at-risk areas), choke points, exports. |
+| Fri Oct 30 | ✅ Drainage choke points (mapped and flow-path crossings, live re-ranking with reports, checked against 2024). ✅ Flood history layer (Muse Spark web search + Nominatim, evidence only). ✅ Muse Spark memo (EN/SW, sources, KMD 7-day outlook). ✅ CSV exports. 47 tests passing. |
 | Sat Oct 31 | **Mobile app, resident mode:** record, GPS, photo, offline queue, my reports and status. |
 | Sun Nov 1 | **Mobile app, crew mode:** assigned tasks, map and navigation, mark cleared with a photo. Nearby-risk view. |
 | Mon Nov 2 | **Web dashboard:** map and layers, use-case switcher, report feed, task board, memo panel. |
