@@ -11,11 +11,16 @@ Layers:
   flood_2024                     UNOSAT 2024 flood mapping, cut to each demo site. Download
                                  FL20240426KEN_SHP.zip from HDX by hand and extract it into
                                  data/raw/flood_2024/ first (the licence asks us to credit UNOSAT).
+  flood_history                  Past flood incidents (2024, March 2026) and the Interior Ministry's
+                                 at-risk areas, found by Muse Spark web search and placed with
+                                 OpenStreetMap's geocoder (Nominatim). Needs META_API_KEY. ~$0.10.
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -36,14 +41,15 @@ OSM_LAYERS = {
     "waterways": ("osm_waterways", NAIROBI_BBOX,
                   ['way["waterway"~"^(river|stream|canal|drain|ditch)$"]', 'way["natural"="water"]'],
                   ["waterway", "natural", "name", "tunnel"]),
-    "roads": ("osm_roads", DEMO_BBOX,
-              ['way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|track)$"]'],
+    "roads": ("osm_roads", NAIROBI_BBOX,
+              ['way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|track)$"]',
+               'way["highway"~"^(footway|path|pedestrian|steps)$"]["bridge"]'],  # footbridges: river crossings in settlements
               ["highway", "surface", "name", "bridge"]),
     "power_lines": ("osm_power_lines", DEMO_BBOX,
                     ['way["power"~"^(line|minor_line|cable)$"]'],
                     ["power", "voltage", "name", "operator"]),
 }
-ALL = [*OSM_LAYERS, "buildings", "terrain", "flood_2024"]
+ALL = [*OSM_LAYERS, "buildings", "terrain", "flood_2024", "flood_history"]
 FLOOD_SITES = ("mathare", "mukuru", "kibera", "korogocho", "east_cluster")
 SITE_HALF_DEG = 0.0105  # ~1.2 km each way: covers the 2.1 km audit square
 
@@ -170,6 +176,108 @@ def cut_flood_2024(force=False):
         print(f"flood_2024/{site}: {counts or 'not covered by the UNOSAT mapping'}")
 
 
+HISTORY_EVENTS = {"2024_long_rains": "the April-May 2024 long-rains floods",
+                  "2026_march": "the March 2026 flash floods"}
+
+
+def _incidents_prompt(label):
+    return (f"Search news reports and official statements about {label} in Nairobi County, Kenya. "
+            "List every distinct place in Nairobi reported flooded (estate, neighbourhood, road or landmark, "
+            "named as in the source). For each give: place, date (YYYY-MM-DD, or YYYY-MM if the day is unknown), "
+            "what_happened (one short factual sentence, e.g. homes flooded, road impassable, deaths), and "
+            "source_url (the page you read it on). Only include places named in a source you opened. "
+            'Up to 40 places. JSON shape: {"incidents": [{"place": "", "date": "", "what_happened": "", "source_url": ""}]}')
+
+
+AT_RISK_PROMPT = ("In March 2026 Kenya's Ministry of Interior published a list of areas in Nairobi at risk of "
+                  "flooding (around 15 March 2026). Find that list and return every Nairobi area on it. "
+                  'JSON shape: {"date": "YYYY-MM-DD", "source_url": "", "areas": [""]}')
+
+
+def _same_url(a, b):
+    norm = lambda u: (u or "").split("?")[0].split("#")[0].rstrip("/").replace("://www.", "://").lower()
+    return norm(a) == norm(b)
+
+
+# Short names news uses that match a different place first on the map
+ALIASES = {"kwa njenga": "Mukuru Kwa Njenga", "kwa reuben": "Mukuru Kwa Reuben", "kwa rueben": "Mukuru Kwa Reuben"}
+
+
+def name_variants(place):
+    """Search terms for a place as news writes it, most specific first:
+    "Mombasa Road at Cabanas" -> itself, "Cabanas", "Mombasa Road"; "Jomo Kenyatta ... (JKIA)" -> also "JKIA"."""
+    place = ALIASES.get(place.strip().lower(), place)
+    inner = re.findall(r"\(([^)]+)\)", place)
+    base = re.sub(r"\([^)]*\)", "", place)
+    parts = re.split(r",| in | at | along | near | and |/", base)
+    clean = lambda t: re.sub(r"\b(informal settlement|slum|ward|junction)\b", "", t, flags=re.I).strip(" -")
+    is_road = lambda t: bool(re.search(r"\b(road|highway|superhighway|avenue|bypass|street|way)\b", t, re.I))
+    out = []
+    for t in [place, base, *sorted(parts, key=is_road), *inner]:  # a landmark beats a long road
+        t = clean(t)
+        if len(t) > 2 and t.lower() not in (o.lower() for o in out):
+            out.append(t)
+    return out[:5]
+
+
+def geocode(client, place):
+    """Nominatim, limited to Nairobi (usage policy: 1 request a second, identify the app).
+    Prefers named places (suburbs, estates) over roads or shops that share the name."""
+    w, s, e, n = NAIROBI_BBOX[1], NAIROBI_BBOX[0], NAIROBI_BBOX[3], NAIROBI_BBOX[2]
+    for name in name_variants(place):
+        time.sleep(1.1)
+        r = client.get("https://nominatim.openstreetmap.org/search",
+                       params={"q": f"{name}, Nairobi, Kenya", "format": "jsonv2", "limit": 5,
+                               "viewbox": f"{w},{n},{e},{s}", "bounded": 1})
+        r.raise_for_status()
+        hits = r.json()
+        if hits:
+            best = next((h for h in hits if h.get("category") == "place"), hits[0])
+            return float(best["lon"]), float(best["lat"]), best["display_name"]
+    return None
+
+
+def fetch_flood_history(force=False):
+    """News and official records of past floods, as map points. Evidence only (memos, report
+    context): coverage favours places reporters reach, so it isn't used in the risk score."""
+    from backend.app.services import meta
+    dst = layer_path("flood_history")
+    if dst.exists() and not force:
+        return print("flood_history: already downloaded")
+    rows = []
+    for event, label in HISTORY_EVENTS.items():
+        ans = meta.spark(_incidents_prompt(label) + meta.JSON_ONLY, web_search=True)
+        cited = [c["url"] for c in ans["citations"]]
+        for it in meta.parse_json(ans["text"]).get("incidents", []):
+            rows.append({"kind": "incident", "event": event, **{k: it.get(k) for k in
+                         ("place", "date", "what_happened", "source_url")},
+                         "source_verified": any(_same_url(it.get("source_url"), u) for u in cited)})
+        print(f"flood_history: {event}: {len(rows)} incidents so far, {ans['web_searches']} web searches")
+    ans = meta.spark(AT_RISK_PROMPT + meta.JSON_ONLY, web_search=True)
+    lst = meta.parse_json(ans["text"])
+    verified = any(_same_url(lst.get("source_url"), c["url"]) for c in ans["citations"])
+    rows += [{"kind": "at_risk_area", "event": "interior_ministry_2026", "place": a, "date": lst.get("date"),
+              "what_happened": "Listed by the Ministry of Interior as at risk of flooding",
+              "source_url": lst.get("source_url"), "source_verified": verified} for a in lst.get("areas", [])]
+    feats, missed, cache = [], [], {}
+    with httpx.Client(timeout=30, headers={"User-Agent": "TerraSat/0.1 (hackathon; flood history)"}) as c:
+        for row in rows:
+            key = (row["place"] or "").strip().lower()
+            if key and key not in cache:
+                cache[key] = geocode(c, row["place"])
+            hit = cache.get(key)
+            if not hit:
+                missed.append(row["place"])
+                continue
+            feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [hit[0], hit[1]]},
+                          "properties": {**row, "geocoded_to": hit[2],
+                                         "precision": "named place (approximate, often a neighbourhood centre)"}})
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps({"type": "FeatureCollection", "features": feats}), encoding="utf-8")
+    print(f"flood_history: {len(feats)} mapped, {sum(f['properties']['source_verified'] for f in feats)} "
+          f"with a source Muse Spark opened; not found on the map: {missed or 'none'}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("layers", nargs="*", help=f"any of {ALL} (default: all)")
@@ -185,9 +293,11 @@ def main():
                 fetch_terrain(a.force)
             elif name == "flood_2024":
                 cut_flood_2024(a.force)
+            elif name == "flood_history":
+                fetch_flood_history(a.force)
             else:
                 fetch_osm(name, a.force)
-        except (RuntimeError, httpx.HTTPError) as e:
+        except (RuntimeError, ValueError, httpx.HTTPError) as e:
             print(f"FAILED: {e}")
 
 
