@@ -15,7 +15,7 @@ import numpy as np
 import shapely
 from shapely.geometry import Point, box, mapping, shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import unary_union
+from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
 from backend.app.core.config import settings
@@ -188,12 +188,16 @@ def combine_with_baseline(sam_buildings: list[Detection], baseline: list[dict]) 
     return out
 
 
-def add_terrain(buildings: list[Detection], waterways: list[dict], dem, p: dict) -> dict:
+def flow_grids(dem) -> tuple[np.ndarray, np.ndarray]:
+    """How deep water would pond in each cell, and how many hectares drain through it."""
+    filled = geo.fill_depressions(dem.z)
+    return filled - dem.z, geo.flow_accumulation(filled) * dem.cell_area_m2 / 1e4
+
+
+def add_terrain(buildings: list[Detection], waterways: list[dict], dem, p: dict, grids) -> dict:
     """Height above the nearest river, ponding dips and overland flow paths,
     sampled at each building's centre from the elevation grid."""
-    filled = geo.fill_depressions(dem.z)
-    depth = filled - dem.z                                    # how deep water would pond
-    upstream_ha = geo.flow_accumulation(filled) * dem.cell_area_m2 / 1e4
+    depth, upstream_ha = grids
     pts = shapely.points([b.geometry.centroid.coords[0] for b in buildings])
     r, c = dem.cells(shapely.get_x(pts), shapely.get_y(pts))
     rivers = unary_union([shape(f["geometry"]) for f in waterways if _is_riparian(f)])
@@ -261,6 +265,138 @@ def score_risk(buildings: list[Detection], p: dict) -> dict:
             "surface_water_flagged": sum(b.props["surface_water_risk"] for b in buildings)}
 
 
+CHOKE_REPORT_TYPES = {"blocked_drain", "flooding", "garbage", "collapsed_bridge"}
+
+
+def flood_2024_checker(unosat: list[dict], near_m: float = 20) -> Callable[[Point], Optional[bool]]:
+    """Returns check(point): inside (or within near_m of) the 2024 flood extent?
+    None where the 2024 image was clouded or didn't reach, so nobody reads "no flood" there."""
+    by_kind: dict[str, list] = {}
+    for f in unosat:
+        by_kind.setdefault(f["properties"].get("kind"), []).append(shape(f["geometry"]))
+    hit = lambda k, pt, d=0.0: any(g.distance(pt) <= d for g in by_kind.get(k, []))  # distance: buffering 75k-vertex extents runs out of memory
+
+    def check(pt: Point) -> Optional[bool]:
+        if not hit("analysis_extent", pt) or hit("cloud", pt):
+            return None
+        return hit("flood_extent", pt, near_m / 111_320)
+    return check
+
+
+def find_choke_points(roads: list[dict], waterways: list[dict], dem, upstream_ha, buildings: list[Detection],
+                      unosat: list[dict], bounds, p: dict, epsg: int) -> list[dict]:
+    """Places where water has to pass under a road (a culvert or bridge) and can back up when it blocks.
+
+    Two kinds:
+      mapped     a road crosses a waterway mapped in OpenStreetMap (rivers, streams, drains, ditches)
+      flow_path  a road crosses a DEM flow path with no mapped waterway (often an unmapped drain):
+                 a peak in upstream area along the road, falling away on both sides
+    """
+    cfg = p.get("choke_points", {})
+    min_ha, merge_m, near_m = cfg.get("min_upstream_ha", 20), cfg.get("merge_m", 60), cfg.get("near_m", 150)
+    audit = box(*bounds)
+    road_feats = [f for f in roads if f["geometry"]["type"] == "LineString"]
+    road_lines = [shape(f["geometry"]) for f in road_feats]
+    if not road_lines:
+        return []
+    road_tree = STRtree(road_lines)
+    cands = []  # (lon/lat point, kind)
+    for w in waterways:
+        g = shape(w["geometry"])
+        if g.geom_type != "LineString":
+            continue
+        for j in road_tree.query(g, predicate="intersects"):
+            x = g.intersection(road_lines[j])
+            cands += [(pt, "mapped") for pt in getattr(x, "geoms", [x])
+                      if pt.geom_type == "Point" and audit.contains(pt)]
+    up_at = lambda lon, lat: upstream_ha[dem.cells(lon, lat)] if dem is not None else np.zeros(np.size(lon))
+    if dem is not None:
+        step = min(10.0, dem.dy * 110_574 / 2)  # metres between samples along a road: under half a DEM cell
+        merged = linemerge(unary_union(road_lines))  # whole streets: OSM splits roads at bridges
+        for line in getattr(merged, "geoms", [merged]):
+            n = int(geo.to_utm(line, epsg).length // step) + 1
+            if n < 9:
+                continue
+            pts = shapely.line_interpolate_point(line, np.linspace(0, 1, n), normalized=True)
+            a = up_at(shapely.get_x(pts), shapely.get_y(pts))
+            for i in range(4, n - 4):
+                if (a[i] >= min_ha and a[i] == a[i - 3:i + 4].max()
+                        and max(a[i - 4], a[i + 4]) < 0.5 * a[i] and audit.contains(pts[i])):
+                    cands.append((pts[i], "flow_path"))
+    if not cands:
+        return []
+    # the DEM line can sit a cell off the mapped one, so take the best of the 3x3 cells around each point
+    pad = np.pad(upstream_ha, 1, mode="edge") if dem is not None else None
+    best = (np.max([pad[i:i + upstream_ha.shape[0], j:j + upstream_ha.shape[1]] for i in range(3) for j in range(3)],
+                   axis=0) if dem is not None else None)
+    lons, lats = np.array([c[0].x for c in cands]), np.array([c[0].y for c in cands])
+    ups = best[dem.cells(lons, lats)] if dem is not None else np.zeros(len(cands))
+    kept: list[list] = []  # [utm point, lon/lat point, kind, upstream]
+    for i in np.argsort(-ups, kind="stable"):
+        u = geo.to_utm(cands[i][0], epsg)
+        twin = next((k for k in kept if k[0].distance(u) <= merge_m), None)
+        if twin is None:
+            kept.append([u, cands[i][0], cands[i][1], float(ups[i])])
+        elif cands[i][1] == "mapped":
+            twin[2] = "mapped"
+    b_utm = [geo.to_utm(b.geometry.centroid, epsg) for b in buildings
+             if b.props.get("risk") in ("high", "medium")]
+    b_tree = STRtree(b_utm) if b_utm else None
+    ww_named = [(shape(w["geometry"]), w["properties"]) for w in waterways]
+    in_2024 = flood_2024_checker(unosat)
+    feats = []
+    for u, pt, kind, up in kept:
+        road = road_feats[int(road_tree.nearest(pt))]["properties"]
+        ww = min(ww_named, key=lambda gp: gp[0].distance(pt), default=None)
+        ww = ww[1] if ww and geo.to_utm(ww[0], epsg).distance(u) <= 50 else {}
+        feats.append({"type": "Feature", "geometry": mapping(pt), "properties": {
+            "class": "choke_point", "kind": kind, "upstream_ha": round(up),
+            "road": road.get("name") or road.get("highway"), "road_is_bridge": road.get("bridge") == "yes",
+            "watercourse": ww.get("name") or ww.get("waterway") or ww.get("natural"),
+            "buildings_at_risk_nearby": len(b_tree.query(u.buffer(near_m), predicate="intersects")) if b_tree else 0,
+            "in_2024_flood": in_2024(pt)}})
+    return rank_choke_points(feats, [], p)
+
+
+def rank_choke_points(points: list[dict], reports: list[dict], p: dict, epsg: Optional[int] = None) -> list[dict]:
+    """Score 0-1 from upstream area (log scale), at-risk buildings nearby and residents' reports
+    nearby (up to 3 count), weighted as the profile says. Re-run whenever new reports come in.
+    The 2024 flood is kept out of the score so it can check the ranking."""
+    if not points:
+        return []
+    cfg = p.get("choke_points", {})
+    w = {"upstream": 0.4, "buildings": 0.3, "reports": 0.3, **cfg.get("weights", {})}
+    near_m, epsg = cfg.get("near_m", 150), epsg or settings.utm_epsg
+    rep = [geo.to_utm(Point(r["lon"], r["lat"]), epsg) for r in reports
+           if r.get("lon") is not None and r.get("issue_type") in CHOKE_REPORT_TYPES and r.get("status") != "dismissed"]
+    max_up = max(math.log1p(f["properties"]["upstream_ha"]) for f in points) or 1
+    max_b = max(f["properties"]["buildings_at_risk_nearby"] for f in points) or 1
+    for f in points:
+        pr = f["properties"]
+        u = geo.to_utm(shape(f["geometry"]), epsg)
+        pr["reports_nearby"] = sum(r.distance(u) <= near_m for r in rep)
+        pr["score"] = round(w["upstream"] * math.log1p(pr["upstream_ha"]) / max_up
+                            + w["buildings"] * pr["buildings_at_risk_nearby"] / max_b
+                            + w["reports"] * min(pr["reports_nearby"], 3) / 3, 3)
+    points.sort(key=lambda f: -f["properties"]["score"])
+    for i, f in enumerate(points, 1):
+        f["properties"]["rank"] = i
+    return points
+
+
+def choke_point_summary(points: list[dict], top: int = 10) -> dict:
+    """Counts, the top few, and a check: are the top-ranked ones where the 2024 flood was?"""
+    seen = [f["properties"]["in_2024_flood"] for f in points if f["properties"]["in_2024_flood"] is not None]
+    seen_top = [f["properties"]["in_2024_flood"] for f in points[:top] if f["properties"]["in_2024_flood"] is not None]
+    pct = lambda xs: round(100 * sum(xs) / len(xs), 1) if xs else None
+    keys = ("rank", "kind", "road", "watercourse", "upstream_ha", "buildings_at_risk_nearby", "reports_nearby", "score")
+    return {"found": len(points), "by_kind": dict(Counter(f["properties"]["kind"] for f in points)),
+            "top": [{**{k: f["properties"][k] for k in keys}, "lon": f["geometry"]["coordinates"][0],
+                     "lat": f["geometry"]["coordinates"][1]} for f in points[:5]],
+            "check_2024": {"top_in_2024_flood_pct": pct(seen_top), "all_in_2024_flood_pct": pct(seen),
+                           "top_n": top, "note": "share of points the 2024 image could see"}}
+
+
 def compare_with_2024(buildings: list[Detection], unosat: list[dict], riparian_zone,
                       bounds, epsg: int, match_m: float = 10.0) -> Optional[dict]:
     """Flag buildings inside the UNOSAT 1 May 2024 flood extent and check how
@@ -306,6 +442,16 @@ def compare_with_2024(buildings: list[Detection], unosat: list[dict], riparian_z
     }
 
 
+def history_summary(history: list[dict], top: int = 12) -> dict:
+    """Past floods named in news and official statements near the audit area (evidence only)."""
+    keys = ("place", "date", "event", "what_happened", "source_url", "source_verified")
+    pr = [f["properties"] for f in history]
+    return {"incidents": sum(p["kind"] == "incident" for p in pr),
+            "listed_at_risk_2026": sorted({p["place"] for p in pr if p["kind"] == "at_risk_area"}),
+            "items": [{k: p.get(k) for k in keys} for p in sorted(pr, key=lambda p: p.get("date") or "", reverse=True)][:top],
+            "note": "From news and official statements, placed at neighbourhood level. Not used in the risk score."}
+
+
 @register("flood_exposure")
 def flood_exposure(ctx: AnalysisContext):
     p = ctx.params
@@ -324,14 +470,21 @@ def flood_exposure(ctx: AnalysisContext):
     if not baseline:
         summary["note"] = "No building footprint baseline for this area: dense settlements will be undercounted"
     dem = ctx.layers.get("copernicus_dem")
-    summary["terrain"] = add_terrain(buildings, ctx.layers.get("osm_waterways", []), dem, p) if dem is not None and buildings else None
+    grids = flow_grids(dem) if dem is not None else None
+    summary["terrain"] = add_terrain(buildings, ctx.layers.get("osm_waterways", []), dem, p, grids) if dem is not None and buildings else None
     summary["risk"] = score_risk(buildings, p)
     summary["flood_2024"] = compare_with_2024(buildings, ctx.layers.get("unosat_2024", []), res.riparian_zone,
                                               ctx.bounds, settings.utm_epsg)
+    chokes = find_choke_points(ctx.layers.get("osm_roads", []), ctx.layers.get("osm_waterways", []), dem,
+                               grids[1] if grids else None, buildings, ctx.layers.get("unosat_2024", []),
+                               ctx.bounds, p, settings.utm_epsg)
+    summary["choke_points"] = choke_point_summary(chokes) if chokes else None
+    history = ctx.layers.get("flood_history", [])
+    summary["flood_history"] = history_summary(history) if history else None
     summary["garbage_piles_detected"] = len(_by_class(ctx.detections, "garbage"))
     if not ctx.layers.get("osm_waterways"):
         summary["warning"] = "No waterways layer for this area - run: python scripts/fetch_data.py waterways"
-    return summary, res.to_geojson()["features"] + others
+    return summary, res.to_geojson()["features"] + others + chokes + _layer_features(history, "past_flood")
 
 
 # ------------------------------------------------------- solar & mini-grid
