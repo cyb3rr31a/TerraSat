@@ -3,12 +3,16 @@ TerraSat API. Business logic lives in app/services and use cases in
 app/profiles; the mobile app and the dashboard both call these endpoints.
 Interactive docs: http://127.0.0.1:8000/docs
 """
+import csv
 import hashlib
+import io
 import json
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -16,9 +20,9 @@ from pydantic import BaseModel
 from backend.app.core.config import settings
 from backend.app.profiles.loader import list_profiles, load_profile
 from backend.app.services import reports
-from backend.app.services.audit import PRESETS, run_audit, save_audit
+from backend.app.services.audit import PRESETS, ranked_choke_points, run_audit, save_audit, write_memo
 
-app = FastAPI(title="TerraSat", version="0.2.0",
+app = FastAPI(title="TerraSat", version="0.3.0",
               description="Geospatial auditing engine: satellite imagery + SAM 3.1 + spatial rules + "
                           "Muse Spark, configured by audit profiles. Case study: Nairobi flood exposure.")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -45,7 +49,27 @@ def fail(e: Exception):
         raise HTTPException(404, str(e))
     if isinstance(e, ValueError):
         raise HTTPException(400, str(e))
-    raise HTTPException(502, f"Upstream service failed: {e}")
+    if isinstance(e, (httpx.HTTPError, RuntimeError)):  # Meta / Mapbox down, or a key missing
+        raise HTTPException(502, f"Upstream service failed: {e}")
+    raise e  # a bug: 500, with the full traceback in the server log
+
+
+def csv_response(rows: list[dict], filename: str) -> Response:
+    """Rows as a CSV download (opens in Excel / Google Sheets)."""
+    buf = io.StringIO()
+    if rows:
+        w = csv.DictWriter(buf, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def audit_folder(audit_id: str) -> Path:
+    folder = DATA / "outputs" / "api" / audit_id
+    if not re.fullmatch(r"[0-9a-f]{12}", audit_id) or not (folder / "summary.json").exists():
+        raise HTTPException(404, "audit not found - run POST /audit first")
+    return folder
 
 
 # ------------------------------------------------------------------ engine
@@ -74,6 +98,7 @@ class AuditRequest(BaseModel):
     lon: Optional[float] = None
     lat: Optional[float] = None
     params: dict = {}
+    refresh: bool = False   # re-run even if cached (e.g. after new layers or code)
 
 
 @app.post("/audit")
@@ -94,7 +119,7 @@ def audit(req: AuditRequest) -> dict:
     key = json.dumps([req.profile, round(lon, 5), round(lat, 5), req.params], sort_keys=True)
     audit_id = hashlib.sha1(key.encode()).hexdigest()[:12]
     folder = DATA / "outputs" / "api" / audit_id
-    if (folder / "summary.json").exists():
+    if (folder / "summary.json").exists() and not req.refresh:
         info = json.loads((folder / "summary.json").read_text())
     else:
         try:
@@ -105,6 +130,30 @@ def audit(req: AuditRequest) -> dict:
     return {"audit_id": audit_id, "center": {"lon": lon, "lat": lat}, **info,
             "files": {"geojson": f"{base}/audit.geojson", "overlay": f"{base}/overlay.png",
                       "mosaic": f"{base}/mosaic.jpg"}}
+
+
+@app.get("/audit/{audit_id}/choke-points")
+def choke_points(audit_id: str, format: Literal["json", "csv"] = "json"):
+    """Drainage choke points (culverts and bridges), ranked with the latest residents' reports."""
+    rows = [{**{k: f["properties"].get(k) for k in ("rank", "score", "kind", "road", "watercourse", "upstream_ha",
+                                                    "buildings_at_risk_nearby", "reports_nearby", "in_2024_flood")},
+             "lat": round(f["geometry"]["coordinates"][1], 6), "lon": round(f["geometry"]["coordinates"][0], 6)}
+            for f in ranked_choke_points(audit_folder(audit_id), reports.list_reports(db()))]
+    return csv_response(rows, f"choke_points_{audit_id}.csv") if format == "csv" else rows
+
+
+@app.post("/audit/{audit_id}/memo")
+def memo(audit_id: str, lang: Literal["en", "sw"] = "en", refresh: bool = False) -> dict:
+    """Briefing memo by Muse Spark, with sources. Cached; refresh=true writes a new one
+    (e.g. after new reports or a new forecast). Download: /outputs/api/<audit_id>/memo_<lang>.md"""
+    folder = audit_folder(audit_id)
+    cached = folder / f"memo_{lang}.json"
+    if cached.exists() and not refresh:
+        return json.loads(cached.read_text(encoding="utf-8"))
+    try:
+        return write_memo(folder, reports.list_reports(db()), lang)
+    except Exception as e:  # noqa: BLE001
+        fail(e)
 
 
 # ------------------------------------------------------- citizen reports
@@ -123,9 +172,17 @@ def create_report(audio: UploadFile = File(...), lat: Optional[float] = Form(Non
 
 
 @app.get("/reports")
-def get_reports(status: Optional[str] = None, device_id: Optional[str] = None, since: Optional[str] = None):
-    """Dashboard feed (filter by status / since) or one resident's reports (device_id)."""
-    return reports.list_reports(db(), status, device_id, since)
+def get_reports(status: Optional[str] = None, device_id: Optional[str] = None, since: Optional[str] = None,
+                format: Literal["json", "csv"] = "json"):
+    """Dashboard feed (filter by status / since) or one resident's reports (device_id). format=csv to export."""
+    rows = reports.list_reports(db(), status, device_id, since)
+    if format == "csv":
+        keep = ("id", "created_at", "status", "issue_type", "urgency", "place", "lat", "lon", "location_source",
+                "summary_en", "summary_sw", "transcript")
+        return csv_response([{**{k: r.get(k) for k in keep}, "corroborated": r["context"].get("corroborated"),
+                              "distance_to_watercourse_m": r["context"].get("distance_to_watercourse_m")}
+                             for r in rows], "reports.csv")
+    return rows
 
 
 class ReportUpdate(BaseModel):
