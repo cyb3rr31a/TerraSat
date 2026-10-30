@@ -1,5 +1,7 @@
 # TerraSat
 
+[![tests](https://github.com/cyb3rr31a/TerraSat/actions/workflows/tests.yml/badge.svg)](https://github.com/cyb3rr31a/TerraSat/actions/workflows/tests.yml)
+
 **Ask planning questions of satellite imagery.**
 
 TerraSat is a geospatial auditing engine for Kenyan urban and regional planning. Drop a pin or say what you need. TerraSat pulls current satellite imagery, uses **SAM 3.1** to find what the question requires (roofs, solar panels, garbage piles, water…), applies spatial rules (buffers, rings, distances) against map layers, and returns metrics, a verdict and a **Muse Spark** memo grounded in live web search, plus GeoJSON and CSV exports for QGIS.
@@ -126,6 +128,7 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 | Command | What it does |
 |---|---|
 | `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap), building footprints (Overture Maps) and elevation (Copernicus GLO-30) to `data/raw/`, and cuts the UNOSAT 2024 flood mapping to each site (download `FL20240426KEN_SHP.zip` from HDX into `data/raw/flood_2024/` first); skips what you already have |
+| `python scripts/fetch_data.py flood_history` | Past Nairobi floods (2024, March 2026, Interior Ministry at-risk list) found by Muse Spark web search and mapped with Nominatim |
 | `python scripts/run_audit.py --profile flood --preset mathare` | Runs a full audit; results in `data/outputs/<profile>_<place>/` |
 | `python scripts/run_audit.py --profile solar_minigrid --preset syokimau` | Same engine, solar & mini-grid profile |
 | `python scripts/run_audit.py --profile flood --offline` | Runs without internet (fake imagery + mock SAM) |
@@ -149,6 +152,9 @@ Start it with `uvicorn backend.app.main:app --reload`; interactive docs at http:
 | `POST /reports` | A resident's voice note (any audio format) + GPS + optional photo -> transcript, issue type, place, urgency, EN/SW summary, corroboration against river distance, height and 2024 floods |
 | `GET /reports`, `PATCH /reports/{id}` | Report feed (filter by status, device or time) and status updates |
 | `GET /crews`, `POST /tasks`, `GET /tasks`, `PATCH /tasks/{id}` | Assign reports to crews; crews mark tasks en route / cleared with an after photo |
+| `GET /audit/{id}/choke-points` | Culverts and bridges to clear, ranked by land draining through, at-risk buildings and residents' reports (re-ranked live); `format=csv` to export |
+| `POST /audit/{id}/memo?lang=en` | Muse Spark briefing memo (English or Swahili) with sources and this week's KMD rain outlook; saved as `memo_<lang>.md` |
+| `GET /reports?format=csv` | Reports as CSV |
 
 Report statuses: `corroborated` / `unconfirmed` -> `assigned` -> `cleared` (or `dismissed`). Data is stored in `data/terrasat.db` (SQLite) and `data/media/`.
 
@@ -177,18 +183,16 @@ docs/SPEC.md              full specification and roadmap
 ## Status
 
 - **Working:**
-  - imagery pipeline (Mapbox Static Images API);
-  - SAM 3.1 integration (official `meta-sam-parser`);
-  - dedup across windows;
-  - flood exposure and solar/mini-grid analyzers;
-  - profile system;
-  - tests.
+  - imagery pipeline (Mapbox Static Images API) and SAM 3.1 with Overture footprints;
+  - flood risk rules (river distance + height, surface-water flag), checked against UNOSAT's 2024 damage;
+  - drainage choke points, re-ranked live with residents' reports;
+  - flood history layer (news and official records, evidence only);
+  - voice reports (Muse Voice + Muse Spark), corroboration, crews and tasks;
+  - Muse Spark memo in English and Swahili with sources;
+  - CSV / GeoJSON / Markdown exports;
+  - solar/mini-grid profile;
+  - tests (47).
 - **Next:**
-  - first live runs;
-  - `/audit`, `/reports` and `/tasks` endpoints;
-  - drainage choke points;
-  - elevation (low-lying ground) layer;
-  - Muse Spark memo;
   - mobile app (resident and crew modes);
   - web dashboard.
 
@@ -207,6 +211,7 @@ Planned work is tracked as GitHub issues, grouped into milestones **M1 Live pipe
 - **Building footprints:** Overture Maps Foundation (includes Google Open Buildings, Microsoft and OpenStreetMap data; ODbL / CDLA).
 - **Elevation:** Copernicus GLO-30.
 - **2024 flood mapping:** UNITAR-UNOSAT, FL20240426KEN (CC BY-SA), via the Humanitarian Data Exchange.
+- **Flood history:** news and government sources found by Muse Spark (each item keeps its URL); places geocoded with Nominatim (© OpenStreetMap contributors).
 - **Segmentation:** SAM 3.1 by Meta, used under the SAM License. Mask parsing uses `meta-sam-parser`.
 
 ## Responsible use
