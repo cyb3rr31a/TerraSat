@@ -3,7 +3,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File } from 'expo-file-system';
 
 export type Lang = 'en' | 'sw';
-export type Settings = { apiUrl: string; lang: Lang; deviceId: string };
+export type Settings = { apiUrl: string; lang: Lang; deviceId: string; onboarded: boolean;
+                         theme: 'system' | 'light' | 'dark' };
+export type Tone = 'good' | 'mixed' | 'poor';
 
 export type Report = {
   id: number; created_at: string; status: string; issue_type: string | null; place: string | null;
@@ -16,7 +18,8 @@ export type AskReply = {
   reply: string; use_case: string; use_case_name: string | null;
   place: { name: string; matched?: string; lat: number; lon: number; source: 'gps' | 'pin' | 'named' } | null;
   audit: { audit_id: string; files: { overlay: string; mosaic: string; geojson: string }; summary: Record<string, unknown> } | null;
-  highlights: { label: string; value: string | number }[];
+  verdict: { label: string; tone: Tone } | null;
+  highlights: { icon: string; label: string; value: string | number }[];
   ask: Question | null; sources: { url: string; title?: string }[];
   competitors: { source: string; count: number; may_be_more: boolean;
                  nearest: { place_id: string; name: string; distance_m: number; rating: number | null; reviews: number }[] } | null;
@@ -34,7 +37,8 @@ export const newId = () => `${Date.now().toString(36)}-${Math.random().toString(
 
 export async function loadSettings(): Promise<Settings> {
   const saved = JSON.parse((await AsyncStorage.getItem(SETTINGS_KEY)) ?? '{}');
-  const s: Settings = { apiUrl: process.env.EXPO_PUBLIC_API_URL ?? '', lang: 'en', deviceId: newId(), ...saved };
+  const s: Settings = { apiUrl: process.env.EXPO_PUBLIC_API_URL ?? '', lang: 'en', deviceId: newId(), onboarded: false,
+                        theme: 'system', ...saved };
   await saveSettings(s); // keeps the same deviceId from now on
   return s;
 }
