@@ -200,12 +200,14 @@ def test_ask_routes_to_the_right_analysis(client, monkeypatch):
     biz = client.post("/ask", json={"message": "Is this a good spot for a pharmacy?", "lat": lat, "lon": lon}).json()
     assert biz["use_case"] == "business_site" and biz["audit"]["files"]["mosaic"].endswith("mosaic.jpg")
     assert audits[0] == ("business_site", {"business": "pharmacy", "competitor_tags": ["amenity=pharmacy"]}, 1000)
-    assert {"label": "Verdict", "value": "Strong Opportunity"} in biz["highlights"]
+    assert biz["verdict"] == {"label": "Strong opportunity", "tone": "good"}
+    assert {"icon": "competitors", "label": "Competitors within 500 m", "value": 0} in biz["highlights"]
     assert biz["ask"] is None                                  # a map pin, not someone standing there
 
     flood = client.post("/ask", json={"message": "Does it flood?", "lang": "sw", "lat": lat + 15 / 111_320, "lon": lon,
                                       "on_site": True, "device_id": "p1"}).json()
     assert flood["check"]["flood_risk"] == "high" and flood["ask"]["id"] == "flooded_last_season"
+    assert flood["verdict"] == {"label": "High flood risk", "tone": "poor"}
     assert "Kiswahili" in prompts[1]
 
     other = client.post("/ask", json={"message": "Will it rain tomorrow?"}).json()
@@ -239,3 +241,31 @@ def test_google_competitors_pages_and_filters(client, monkeypatch):
     assert g["avg_rating"] == 4.3 and g["source"] == "Google Maps"
     monkeypatch.setattr(assistant.settings, "google_maps_api_key", "")
     assert assistant.google_competitors("pharmacy", lon, lat, 500) is None    # no key: OpenStreetMap only
+
+
+def test_place_suggestions_rank_suburbs_and_prefixes_first(client, monkeypatch):
+    from backend.app.services import assistant
+    monkeypatch.setattr(assistant, "_gazetteer", lambda: [
+        ("west hill school", "West Hill School", "school", 36.78, -1.31),
+        ("westlands", "Westlands", "suburb", 36.80, -1.26),
+        ("south westlands", "South Westlands", "neighbourhood", 36.80, -1.27),
+        ("westlands", "Westlands", "marketplace", 36.80, -1.26)])
+    names = [p["name"] for p in client.get("/places", params={"q": "WEST"}).json()]
+    assert names == ["Westlands", "West Hill School", "South Westlands"]       # duplicate name dropped
+    assert client.get("/places", params={"q": "w"}).json() == []
+
+
+
+def test_spark_returns_only_the_final_answer(monkeypatch):
+    from backend.app.services import meta
+    msg = lambda text, urls=(): {"type": "message", "content": [{"type": "output_text", "text": text, "annotations": [
+        {"type": "url_citation", "url": u, "title": "t"} for u in urls]}]}
+    out = {"output": [msg("I'll check Nairobi's zoning rules.", ["https://a.org"]), {"type": "web_search_call"},
+                      msg("I found the Zone 4D limit; opening it.", ["https://a.org", "https://b.org"]),
+                      {"type": "web_search_call"}, msg("Verdict: medium density.", ["https://b.org"])]}
+    monkeypatch.setattr(meta.settings, "meta_api_key", "k")
+    monkeypatch.setattr(meta.httpx, "post", lambda *a, **k: type("R", (), {
+        "raise_for_status": lambda self: None, "json": lambda self: out})())
+    ans = meta.spark("q", web_search=True)
+    assert ans["text"] == "Verdict: medium density." and ans["web_searches"] == 2
+    assert [c["url"] for c in ans["citations"]] == ["https://a.org", "https://b.org"]      # all sources, no repeats
