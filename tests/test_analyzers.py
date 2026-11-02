@@ -4,7 +4,7 @@ from backend.app.profiles.loader import list_profiles, load_profile
 from backend.app.services import geo
 from backend.app.services.analyzers import ANALYZERS, AnalysisContext, compute_exposure, run_analyzer
 from backend.app.services.audit import run_audit
-from backend.app.services.layers import LAYER_FILES
+from backend.app.services.layers import LAYER_FILES, LIVE_LAYERS
 from backend.app.services.sam_service import Detection, MockBackend
 from backend.app.services.tiles import TileCache
 from tests.test_tiles import fake_fetcher
@@ -23,11 +23,11 @@ BOUNDS = (LON - 1100 * M, LAT - 1100 * M, LON + 1100 * M, LAT + 1100 * M)
 
 def test_every_profile_is_wired():
     profiles = list_profiles()
-    assert {"flood", "solar_minigrid"} <= {p.id for p in profiles}
+    assert {"flood", "solar_minigrid", "densification", "business_site"} <= {p.id for p in profiles}
     assert sum(p.status == "case_study" for p in profiles) == 1  # one flagship demo
     for p in profiles:
         assert p.analyzer in ANALYZERS
-        assert all(layer in LAYER_FILES for layer in p.layers)
+        assert all(layer in LAYER_FILES or layer in LIVE_LAYERS for layer in p.layers)
         assert "building" in p.classes
         for spec in p.classes.values():
             # SAM 3.1 takes one short noun phrase per request - no lists
@@ -239,3 +239,48 @@ def test_choke_points_where_roads_cross_water():
     after = {f["properties"]["kind"]: f for f in rank_choke_points(pts, [report], load_profile("flood").params)}
     assert after["flow_path"]["properties"]["reports_nearby"] == 1
     assert after["flow_path"]["properties"]["score"] > before["flow_path"]
+
+
+
+def test_rooftop_solar_for_the_roof_at_the_pin():
+    roof = det("building", 0, 0, size=20)                    # 400 m2 roof under the pin
+    others = [det("building", 100 + i * 30, 0) for i in range(4)]
+    panel = det("solar_panel", 100, 0, 3)
+    sun = {"annual_kwh_m2_day": 5.0, "source": "test"}
+    s = run_analyzer(load_profile("solar_minigrid"), AnalysisContext(
+        [roof, *others, panel], {"osm_power_lines": [], "nasa_power": sun}, BOUNDS, (LON, LAT), {})).summary["rooftop"]
+    pin = s["building_at_pin"]
+    assert 395 < pin["roof_m2"] < 405 and pin["kwp"] == 40.0          # 400 x 0.6 / 6
+    assert pin["kwh_per_year"] == round(40 * 5.0 * 365 * 0.75)         # 54,750 kWh
+    assert pin["payback_years"] == round(40 * 800 / (pin["kwh_per_year"] * 0.2), 1)
+    assert s["good_sunshine"] and s["area_buildings_with_panels"] == 1 and s["area_adoption_pct"] == 20.0
+
+
+def test_densification_coverage_new_buildings_and_floors():
+    sq = lambda dx, dy, size: mapping(det("building", dx, dy, size).geometry)
+    baseline = [{"type": "Feature", "geometry": sq(i * 40 - 200, 0, 20), "properties": {"num_floors": 4}} for i in range(10)]
+    new_roof = det("building", 0, 300, 20)                   # seen by SAM, missing from the baseline
+    old_roof = det("building", 0, 0, 20)                      # already in the baseline
+    bounds = (LON - 300 * M, LAT - 300 * M, LON + 300 * M, LAT + 400 * M)
+    s = run_analyzer(load_profile("densification"), AnalysisContext(
+        [new_roof, old_roof], {"buildings_baseline": baseline, "osm_roads": []}, bounds, (LON, LAT), {})).summary
+    assert s["buildings"] == 11 and s["new_since_baseline"] == 1
+    assert 0.9 < s["ground_coverage_pct"] < 1.2             # 11 x 400 m2 on 42 ha
+    assert s["avg_floors_where_known"] == 4.0 and s["verdict"].startswith("LOW_DENSITY")
+
+
+def test_business_site_competitors_anchors_and_verdict():
+    poi = lambda dx, dy, **tags: {"type": "Feature", "geometry": mapping(Point(LON + dx * M, LAT + dy * M)),
+                                  "properties": tags}
+    pois = [poi(100, 0, amenity="pharmacy", name="Near Chemist"), poi(900, 0, amenity="pharmacy", name="Far Chemist"),
+            poi(50, 50, amenity="school"), poi(0, 80, highway="bus_stop"), poi(20, 0, shop="supermarket")]
+    homes = [det("building", (i % 20) * 20 - 200, (i // 20) * 20 - 200) for i in range(400)]
+    params = {"competitor_tags": ["amenity=pharmacy"], "business": "pharmacy"}
+    s = run_analyzer(load_profile("business_site"), AnalysisContext(
+        homes, {"osm_pois": pois, "osm_roads": []}, BOUNDS, (LON, LAT), params)).summary
+    assert s["competitors"] == 1 and s["competitors_nearest"][0] == {"name": "Near Chemist", "distance_m": 100}
+    assert s["anchors"]["schools"] == 1 and s["anchors"]["transport"] == 1 and s["anchors"]["shopping"] == 1
+    assert s["people_in_catchment_est"] == 1600 and s["people_per_competitor_est"] == 800
+    assert s["verdict"] == "MODERATE"
+    none = run_analyzer(load_profile("business_site"), AnalysisContext(homes, {"osm_pois": pois}, BOUNDS, (LON, LAT), {}))
+    assert none.summary["verdict"].startswith("NEEDS_BUSINESS_TYPE")

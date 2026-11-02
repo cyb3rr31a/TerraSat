@@ -26,28 +26,18 @@ def post_report(client, client_id="abc-1"):
                        files={"audio": ("note.m4a", b"fake audio", "audio/mp4")})
 
 
-def test_report_to_cleared_task_loop(client):
+def test_report_flow(client):
     r = post_report(client).json()
-    assert r["issue_type"] == "blocked_drain" and r["status"] == "corroborated"
+    assert r["issue_type"] == "blocked_drain" and r["status"] == "corroborated" and r["profile"] == "flood"
     assert r["summary_sw"] and r["context"]["corroborated"] is True
     assert post_report(client).json()["id"] == r["id"]           # offline-queue retry: no duplicate
     assert len(client.get("/reports", params={"device_id": "phone-1"}).json()) == 1
-
-    crew = client.get("/crews").json()[0]
-    task = client.post("/tasks", json={"report_id": r["id"], "crew_id": crew["id"]}).json()
-    assert task["status"] == "assigned" and task["place"].startswith("Mathare")
-    assert client.get(f"/reports").json()[0]["status"] == "assigned"
-
-    done = client.patch(f"/tasks/{task['id']}", data={"status": "cleared"},
-                        files={"photo": ("after.jpg", b"jpeg", "image/jpeg")}).json()
-    assert done["status"] == "cleared" and done["after_photo_path"]
-    assert client.get("/reports").json()[0]["status"] == "cleared"   # the resident sees it cleared
-    assert len(client.get("/tasks", params={"crew_id": crew["id"]}).json()) == 1
+    assert client.patch(f"/reports/{r['id']}", json={"status": "resolved"}).json()["status"] == "resolved"
+    assert client.get("/reports", params={"device_id": "phone-1"}).json()[0]["status"] == "resolved"
 
 
 def test_bad_inputs(client):
-    assert client.patch("/tasks/999", data={"status": "cleared"}).status_code == 404
-    assert client.post("/tasks", json={"report_id": 999, "crew_id": 1}).status_code == 404
+    assert client.patch("/reports/999", json={"status": "resolved"}).status_code == 404
     rid = post_report(client).json()["id"]
     assert client.patch(f"/reports/{rid}", json={"status": "flying"}).status_code == 400
     assert client.post("/audit", json={"profile": "flood"}).status_code == 400
@@ -62,9 +52,9 @@ def test_audit_is_cached(client, monkeypatch):
         info = {"profile": "flood", "bounds": {}, "summary": {"buildings_total": 1}}
         (folder / "summary.json").write_text(__import__("json").dumps(info))
         return info
-    monkeypatch.setattr(main, "run_audit", lambda *a, **k: calls.append(a) or object())
-    monkeypatch.setattr(main, "save_audit", fake_save)
-    monkeypatch.setattr(main, "DATA", settings.data_dir)
+    from backend.app.services import audit
+    monkeypatch.setattr(audit, "run_audit", lambda *a, **k: calls.append(a) or object())
+    monkeypatch.setattr(audit, "save_audit", fake_save)
     a = client.post("/audit", json={"preset": "mukuru"}).json()
     b = client.post("/audit", json={"preset": "mukuru"}).json()
     assert a["audit_id"] == b["audit_id"] and len(calls) == 1
@@ -149,3 +139,103 @@ def test_memo_is_sourced_and_cached(client, monkeypatch, tmp_path):
     client.post(f"/audit/{aid}/memo", params={"lang": "sw"})
     assert len(prompts) == 1                                   # cached
     assert client.post(f"/audit/{aid}/memo", params={"lang": "fr"}).status_code == 422
+
+
+def test_non_flood_report_is_received_not_corroborated(client, monkeypatch):
+    monkeypatch.setattr(reports.meta, "spark_json", lambda prompt, **kw: {
+        "issue_type": "power_outage", "place": "Mathare", "urgency": "medium",
+        "summary_en": "Power has been off since morning.", "summary_sw": "Umeme umekatika tangu asubuhi."})
+    monkeypatch.setattr(reports, "corroborate", lambda lon, lat: pytest.fail("power reports have no flood check"))
+    r = post_report(client, client_id="power-1").json()
+    assert r["issue_type"] == "power_outage" and r["profile"] == "solar_minigrid" and r["status"] == "received"
+    types = client.get("/report-types").json()
+    assert types["standing_water"]["profile"] == "flood" and types["water_supply"]["profile"] is None
+
+
+def river_layers(monkeypatch):
+    """A river along LAT (the valley floor of the synthetic DEM) for the place check."""
+    from backend.app.services import assistant
+    from tests.test_analyzers import LAT, LON, valley_dem
+    river = {"type": "Feature", "properties": {"waterway": "river", "name": "Test River"},
+             "geometry": mapping(LineString([(LON - 0.01, LAT), (LON + 0.01, LAT)]))}
+    monkeypatch.setattr(assistant, "load_layer", lambda name, bounds, **kw: [river] if name == "osm_waterways" else [])
+    monkeypatch.setattr(assistant, "load_dem", lambda bounds: valley_dem())
+    return LON, LAT
+
+
+def test_place_check_and_quick_questions(client, monkeypatch):
+    lon, lat = river_layers(monkeypatch)
+    by_river = client.post("/check", json={"lat": lat + 15 / 111_320, "lon": lon}).json()
+    assert by_river["flood_risk"] == "high" and by_river["in_riparian_reserve"] is True
+    assert by_river["in_2024_flood"] is None and any("Riparian" in n for n in by_river["notes"])
+    uphill = client.post("/check", json={"lat": lat + 600 / 111_320, "lon": lon}).json()
+    assert uphill["flood_risk"] == "low" and uphill["in_riparian_reserve"] is False
+
+    first = {"lat": lat, "lon": lon, "device_id": "phone-9"}
+    r = client.post("/observations", json={**first, "question_id": "flooded_last_season", "answer": "knee"}).json()
+    assert r["next"]["id"] == "water_stays"                       # asks the next unanswered question
+    assert client.post("/observations", json={**first, "question_id": "flooded_last_season",
+                                              "answer": "swimming"}).status_code == 400
+    said = client.post("/check", json={"lat": lat, "lon": lon}).json()["neighbours_say"]
+    assert said["flooded_last_season"]["answers"] == {"Knee deep": 1}
+
+
+def test_ask_routes_to_the_right_analysis(client, monkeypatch):
+    from backend.app.services import assistant
+    lon, lat = river_layers(monkeypatch)
+    routes = iter([{"use_case": "business_site", "place": None, "business": "pharmacy",
+                    "competitor_tags": ["amenity=pharmacy", "nonsense"]},
+                   {"use_case": "flood", "place": None},
+                   {"use_case": "weather", "place": None}])
+    monkeypatch.setattr(assistant.meta, "spark_json", lambda prompt, **kw: next(routes))
+    prompts, audits = [], []
+    monkeypatch.setattr(assistant.meta, "spark", lambda prompt, **kw: prompts.append(prompt) or {
+        "text": "Verdict: ...", "citations": [{"url": "https://example.org", "title": "x"}], "web_searches": 1})
+    fake = {"business_site": {"verdict": "STRONG_OPPORTUNITY", "competitors": 0, "people_in_catchment_est": 4000,
+                              "people_per_competitor_est": 4000, "anchors": {"schools": 2}},
+            "flood": {"risk": {"high": 1}}}
+    monkeypatch.setattr(assistant, "cached_audit", lambda pid, lon, lat, params, side_m: audits.append((pid, params, side_m))
+                        or {"audit_id": "abc", "summary": fake[pid], "files": {"mosaic": "/outputs/api/abc/mosaic.jpg"}})
+
+    biz = client.post("/ask", json={"message": "Is this a good spot for a pharmacy?", "lat": lat, "lon": lon}).json()
+    assert biz["use_case"] == "business_site" and biz["audit"]["files"]["mosaic"].endswith("mosaic.jpg")
+    assert audits[0] == ("business_site", {"business": "pharmacy", "competitor_tags": ["amenity=pharmacy"]}, 1000)
+    assert {"label": "Verdict", "value": "Strong Opportunity"} in biz["highlights"]
+    assert biz["ask"] is None                                  # a map pin, not someone standing there
+
+    flood = client.post("/ask", json={"message": "Does it flood?", "lang": "sw", "lat": lat + 15 / 111_320, "lon": lon,
+                                      "on_site": True, "device_id": "p1"}).json()
+    assert flood["check"]["flood_risk"] == "high" and flood["ask"]["id"] == "flooded_last_season"
+    assert "Kiswahili" in prompts[1]
+
+    other = client.post("/ask", json={"message": "Will it rain tomorrow?"}).json()
+    assert other["use_case"] == "general" and other["audit"] is None and "can analyse" in prompts[2]
+
+
+def test_google_competitors_pages_and_filters(client, monkeypatch):
+    from backend.app.services import assistant
+    lon, lat = 36.80, -1.29
+    place = lambda i, dx, status="OPERATIONAL", rating=4.0: {
+        "id": f"p{i}", "displayName": {"text": f"Chemist {i}"}, "businessStatus": status, "rating": rating,
+        "userRatingCount": 10, "location": {"latitude": lat, "longitude": lon + dx / 111_320}}
+    pages = [{"places": [place(1, 100), place(2, 450), place(3, 300, "CLOSED_PERMANENTLY")], "nextPageToken": "t2"},
+             {"places": [place(4, 700), place(5, 50, rating=5.0)]}]          # 700 m: outside the 500 m circle
+    sent = []
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, url, json, headers):
+            sent.append(json)
+            page = pages[len(sent) - 1]
+            return type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: page})()
+
+    monkeypatch.setattr(assistant.httpx, "Client", FakeClient)
+    monkeypatch.setattr(assistant.settings, "google_maps_api_key", "test-key")
+    g = assistant.google_competitors("pharmacy", lon, lat, 500)
+    assert sent[1]["pageToken"] == "t2" and sent[0]["textQuery"] == "pharmacy"
+    assert g["count"] == 3 and [x["name"] for x in g["nearest"]] == ["Chemist 5", "Chemist 1", "Chemist 2"]
+    assert g["avg_rating"] == 4.3 and g["source"] == "Google Maps"
+    monkeypatch.setattr(assistant.settings, "google_maps_api_key", "")
+    assert assistant.google_competitors("pharmacy", lon, lat, 500) is None    # no key: OpenStreetMap only
