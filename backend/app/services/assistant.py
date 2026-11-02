@@ -25,7 +25,7 @@ from backend.app.services import geo, meta, reports
 from backend.app.services.audit import cached_audit
 from backend.app.services.analyzers import (add_terrain, business_verdict, compute_exposure, flood_2024_checker,
                                             flow_grids, score_risk)
-from backend.app.services.layers import load_dem, load_layer
+from backend.app.services.layers import layer_path, load_dem, load_layer
 from backend.app.services.sam_service import Detection
 
 NAIROBI = (36.65, -1.45, 37.10, -1.15)  # west, south, east, north: where TerraSat has map data today
@@ -82,6 +82,46 @@ def geocode(place: str, client: Optional[httpx.Client] = None) -> Optional[tuple
 @lru_cache(maxsize=256)
 def _geocode_cached(place: str):
     return geocode(place)
+
+
+# --------------------------------------------------------------- place search
+LANDMARKS = {"amenity": {"university", "college", "hospital", "marketplace", "bus_station", "school"},
+             "shop": {"mall", "supermarket"}}
+
+
+@lru_cache(maxsize=1)
+def _gazetteer() -> list[tuple[str, str, str, float, float]]:
+    """(lowercase name, name, kind, lon, lat) for suburbs and named landmarks, read once.
+    Local on purpose: Nominatim's usage policy forbids type-ahead search."""
+    out = []
+    for layer in ("osm_places", "osm_pois"):
+        path = layer_path(layer)
+        if not path.exists():
+            continue
+        for f in json.loads(path.read_text(encoding="utf-8"))["features"]:
+            p, (lon, lat) = f["properties"], f["geometry"]["coordinates"][:2]
+            kind = p.get("place") or next((v for k, v in p.items() if k in LANDMARKS and v in LANDMARKS[k]), None)
+            if p.get("name") and kind:
+                out.append((p["name"].lower(), p["name"], kind, lon, lat))
+    return out
+
+
+def search_places(q: str, limit: int = 8) -> list[dict]:
+    """Suggestions while typing: names that start with the text first, suburbs before landmarks."""
+    q = q.strip().lower()
+    if len(q) < 2:
+        return []
+    order = {"suburb": 0, "neighbourhood": 1, "quarter": 1, "village": 2, "locality": 2}
+    hits = [g for g in _gazetteer() if q in g[0]]
+    hits.sort(key=lambda g: (not g[0].startswith(q), order.get(g[2], 3), len(g[0])))
+    seen, out = set(), []
+    for low, name, kind, lon, lat in hits:
+        if low not in seen:
+            seen.add(low)
+            out.append({"name": name, "kind": kind, "lon": lon, "lat": lat})
+        if len(out) == limit:
+            break
+    return out
 
 
 # --------------------------------------------------------------- ground truth
@@ -220,48 +260,90 @@ def _route(message: str, history: list[dict]) -> dict:
             "competitor_tags": [t for t in out.get("competitor_tags") or [] if isinstance(t, str) and "=" in t]}
 
 
+def verdict(use_case: str, summary: dict, check: Optional[dict], google: Optional[dict] = None) -> Optional[dict]:
+    """One headline per answer, with a tone for colour: good, mixed or poor."""
+    s = summary or {}
+    tidy = lambda v: v.split(" - ")[0].replace("_", " ").capitalize()
+    if use_case == "flood" and check and check.get("flood_risk"):
+        return {"label": f"{check['flood_risk'].capitalize()} flood risk",
+                "tone": {"low": "good", "medium": "mixed", "high": "poor"}[check["flood_risk"]]}
+    if use_case == "solar_minigrid" and s.get("rooftop"):
+        r = s["rooftop"]
+        pay = (r.get("building_at_pin") or {}).get("payback_years")
+        if not r.get("sunshine_kwh_m2_day"):
+            return {"label": "Sunshine data unavailable", "tone": "mixed"}
+        if not r.get("good_sunshine"):
+            return {"label": "Weak sunshine for solar", "tone": "poor"}
+        if pay is None:
+            return {"label": "Good sunshine, no roof at the pin", "tone": "mixed"}
+        return ({"label": f"Solar pays back in ~{pay:g} years", "tone": "good"} if pay <= 8 else
+                {"label": f"Slow payback (~{pay:g} years)", "tone": "mixed" if pay <= 15 else "poor"})
+    if use_case == "densification" and s.get("verdict"):
+        v = s["verdict"]
+        return {"label": tidy(v), "tone": "good" if v.startswith("LOW") else "poor" if v.startswith("DENSE") else "mixed"}
+    if use_case == "business_site":
+        v = (google or {}).get("verdict") or s.get("verdict")
+        if v:
+            return {"label": tidy(v), "tone": {"STRONG_OPPORTUNITY": "good", "CROWDED": "poor"}.get(v, "mixed")}
+    return None
+
+
 def highlights(use_case: str, summary: dict, check: Optional[dict], google: Optional[dict] = None) -> list[dict]:
-    """The few numbers worth a card in the UI, per use case."""
+    """The few numbers worth a tile in the UI, per use case. `icon` is a hint for the apps."""
     s, out = summary or {}, []
-    add = lambda label, value: value is not None and out.append({"label": label, "value": value})
+
+    def add(icon: str, label: str, value):
+        if value is not None:
+            out.append({"icon": icon, "label": label, "value": value})
     if use_case == "flood" and check:
-        add("Flood risk", (check["flood_risk"] or "no data").title())
-        add("Nearest watercourse", f"{check['distance_to_watercourse_m']:.0f} m" if check["distance_to_watercourse_m"] is not None else None)
-        add("Height above it", f"{check['height_above_watercourse_m']:.0f} m" if check["height_above_watercourse_m"] is not None else None)
-        add("In riparian reserve", {True: "Yes", False: "No"}.get(check["in_riparian_reserve"]))
-        add("2024 flood", {True: "Flooded", False: "Not flooded"}.get(check["in_2024_flood"], "Not visible"))
-        add("Past floods nearby", len(check["past_floods_nearby"]))
+        d, h = check["distance_to_watercourse_m"], check["height_above_watercourse_m"]
+        add("water", "Nearest watercourse", f"{d:.0f} m" if d is not None else None)
+        add("height", "Height above it", f"{h:.0f} m" if h is not None else None)
+        add("reserve", "In riparian reserve", {True: "Yes", False: "No"}.get(check["in_riparian_reserve"]))
+        add("flood", "2024 flood", {True: "Flooded", False: "Not flooded"}.get(check["in_2024_flood"], "Not visible"))
+        add("history", "Past floods nearby", len(check["past_floods_nearby"]))
+        add("surface", "Rainwater collects here", {True: "Yes", False: "No"}.get(check.get("surface_water_risk")))
     elif use_case == "solar_minigrid":
         r = s.get("rooftop", {})
         pin = r.get("building_at_pin") or {}
-        add("Sunshine", f"{r['sunshine_kwh_m2_day']} kWh/m²/day" if r.get("sunshine_kwh_m2_day") else None)
-        add("Roof at pin", f"{pin['roof_m2']} m² → {pin['kwp']} kWp" if pin else None)
-        add("Output", f"{pin['kwh_per_year']:,} kWh/yr" if pin.get("kwh_per_year") else None)
-        add("Payback", f"{pin['payback_years']} yrs" if pin.get("payback_years") else None)
-        add("Neighbours with panels", f"{r.get('area_adoption_pct')}%" if r else None)
-        add("Power line", f"{s['distance_center_to_power_line_m']:.0f} m" if s.get("distance_center_to_power_line_m") is not None else None)
+        add("sun", "Sunshine", f"{r['sunshine_kwh_m2_day']} kWh/m²/day" if r.get("sunshine_kwh_m2_day") else None)
+        add("roof", "Roof at pin", f"{pin['roof_m2']} m² · {pin['kwp']} kWp" if pin else None)
+        add("energy", "Output", f"{pin['kwh_per_year']:,} kWh/yr" if pin.get("kwh_per_year") else None)
+        add("payback", "Payback", f"{pin['payback_years']} yrs" if pin.get("payback_years") else None)
+        add("panels", "Neighbours with panels", f"{r.get('area_adoption_pct')}%" if r else None)
+        add("power", "Power line", f"{s['distance_center_to_power_line_m']:.0f} m"
+            if s.get("distance_center_to_power_line_m") is not None else None)
     elif use_case == "densification":
-        add("Ground coverage", f"{s.get('ground_coverage_pct')}%")
-        add("Buildings per ha", s.get("buildings_per_ha"))
-        add("New since baseline", s.get("new_since_baseline"))
-        add("Floor area ratio (est.)", s.get("floor_area_ratio_est"))
-        add("Major road", f"{s['distance_to_major_road_m']} m" if s.get("distance_to_major_road_m") is not None else None)
-        add("Verdict", (s.get("verdict") or "").split(" - ")[0].replace("_", " ").title())
+        add("coverage", "Ground coverage", f"{s.get('ground_coverage_pct')}%")
+        add("density", "Buildings per ha", s.get("buildings_per_ha"))
+        add("new", "New since baseline", s.get("new_since_baseline"))
+        add("floors", "Floor area ratio (est.)", s.get("floor_area_ratio_est"))
+        add("road", "Major road", f"{s['distance_to_major_road_m']} m" if s.get("distance_to_major_road_m") is not None else None)
+        add("open", "Open land", f"{s.get('open_land_pct')}%" if s.get("open_land_pct") is not None else None)
     elif use_case == "business_site":
         g = google or {}
-        verdict = g.get("verdict") or s.get("verdict") or ""
-        add("Verdict", verdict.split(" - ")[0].replace("_", " ").title())
         if google:
-            add("Competitors within 500 m (Google Maps)", f"{g['count']}{'+' if g['may_be_more'] else ''}")
-            add("Their average rating", f"{g['avg_rating']} ★ ({g['total_reviews']:,} reviews)" if g.get("avg_rating") else None)
+            add("competitors", "Competitors within 500 m", f"{g['count']}{'+' if g['may_be_more'] else ''}")
+            add("rating", "Their average rating", f"{g['avg_rating']} ★ ({g['total_reviews']:,})" if g.get("avg_rating") else None)
         else:
-            add("Competitors within 500 m (OpenStreetMap)", s.get("competitors"))
-        add("People nearby (est.)", f"{s.get('people_in_catchment_est', 0):,}")
+            add("competitors", "Competitors within 500 m", s.get("competitors"))
+        add("people", "People nearby (est.)", f"{s.get('people_in_catchment_est', 0):,}")
         per = g.get("people_per_competitor_est") or s.get("people_per_competitor_est")
-        add("People per competitor", f"{per:,}" if per else None)
-        add("Anchors", ", ".join(f"{n} {k}" for k, n in (s.get("anchors") or {}).items() if n) or None)
-        add("Major road", f"{s['distance_to_major_road_m']} m" if s.get("distance_to_major_road_m") is not None else None)
+        add("ratio", "People per competitor", f"{per:,}" if per else None)
+        add("anchors", "Anchors nearby", sum((s.get("anchors") or {}).values()) or None)
+        add("road", "Major road", f"{s['distance_to_major_road_m']} m" if s.get("distance_to_major_road_m") is not None else None)
     return out
+
+
+# The shape every answer takes, so the apps can show it as a tidy card
+ANSWER_FORMAT = """**Verdict:** one sentence.
+
+**Key numbers**
+- Label: value (say "estimate" or "assumption" in brackets where it applies)
+- 3 to 5 lines like this
+
+**Check on the ground**
+- 2 or 3 short, practical checks"""
 
 
 def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Optional[float] = None,
@@ -313,8 +395,9 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
     prompt = (
         "You are TerraSat, an urban planning assistant for Nairobi. People ask about places where they want to build, "
         "buy, rent or open a business.\n"
-        f"Reply in {LANGUAGES.get(lang, 'English')}, under 150 words: start with a one-line verdict, then the key "
-        "numbers, then what to check on the ground.\n"
+        f"Reply in {LANGUAGES.get(lang, 'English')}, under 150 words. Give only the final answer: don't describe "
+        "your searches. Format it in Markdown exactly like this (translate the headings), one item per line:\n"
+        f"{ANSWER_FORMAT}\n"
         f"{framing}\n"
         "Use only facts from DATA, the conversation, or web pages you open and cite (use the web for laws, prices, "
         "tariffs and recent news). Say plainly when something is an estimate or an assumption.\n"
@@ -332,6 +415,7 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
     return {"reply": ans["text"], "use_case": use_case,
             "use_case_name": load_profile(use_case).name if use_case != "general" else None,
             "place": where, "business": route["business"], "audit": audit, "check": check, "ground_truth": truth,
+            "verdict": verdict(use_case, (audit or {}).get("summary"), check, google),
             "highlights": highlights(use_case, (audit or {}).get("summary"), check, google),
             "competitors": google,
             "ask": ask_next, "sources": ans["citations"]}

@@ -41,12 +41,16 @@ def spark(prompt: str, web_search: bool = False, model: str = "muse-spark-1.3") 
     r = httpx.post(f"{_base()}/responses", json=body, headers=_headers(), timeout=180)
     r.raise_for_status()
     out = r.json().get("output", [])
-    parts = [c for item in out if item.get("type") == "message" for c in item.get("content", [])
-             if c.get("type") == "output_text"]
+    texts = lambda item: [c for c in item.get("content", []) if c.get("type") == "output_text"]
+    messages = [item for item in out if item.get("type") == "message"]
+    # With web search, Muse Spark narrates its steps in short messages between searches ("I'll check
+    # the zoning rules..."). Only the last message is the answer; citations can come from any of them.
+    final = texts(messages[-1]) if messages else []
+    every = [p for m in messages for p in texts(m)]
     return {
-        "text": "".join(p.get("text", "") for p in parts).strip(),
-        "citations": [{"url": a.get("url"), "title": a.get("title")} for p in parts
-                      for a in p.get("annotations", []) if a.get("type") == "url_citation"],
+        "text": "".join(p.get("text", "") for p in final).strip(),
+        "citations": list({a.get("url"): {"url": a.get("url"), "title": a.get("title")} for p in every
+                           for a in p.get("annotations", []) if a.get("type") == "url_citation"}.values()),
         "web_searches": sum(item.get("type") == "web_search_call" for item in out),
     }
 

@@ -34,6 +34,8 @@ LAYER_FILES: dict[str, str] = {
     "flood_history": "nairobi_flood_history.geojson",
     # shops, services, schools, clinics, markets, bus stops (OpenStreetMap points)
     "osm_pois": "nairobi_pois.geojson",
+    # suburb and neighbourhood names, for place search in the apps
+    "osm_places": "nairobi_places.geojson",
 }
 # Layers fetched for the exact spot when an audit needs them (cached in data/cache):
 #   nasa_power - long-term solar radiation (NASA POWER climatology, kWh/m2/day)
