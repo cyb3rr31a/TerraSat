@@ -265,7 +265,7 @@ def score_risk(buildings: list[Detection], p: dict) -> dict:
             "surface_water_flagged": sum(b.props["surface_water_risk"] for b in buildings)}
 
 
-CHOKE_REPORT_TYPES = {"blocked_drain", "flooding", "garbage", "collapsed_bridge"}
+CHOKE_REPORT_TYPES = {"blocked_drain", "flooding", "standing_water", "garbage", "collapsed_bridge", "road_impassable"}
 
 
 def flood_2024_checker(unosat: list[dict], near_m: float = 20) -> Callable[[Point], Optional[bool]]:
@@ -488,6 +488,40 @@ def flood_exposure(ctx: AnalysisContext):
 
 
 # ------------------------------------------------------- solar & mini-grid
+def rooftop_solar(buildings: list[Detection], b_utm: list, center_utm, sun: Optional[dict], r: dict) -> dict:
+    """Panels the roof at the pin could take and what they would produce, plus the area's potential.
+    kWp = roof m2 x usable share / m2 per kWp; kWh/year = kWp x sunshine x 365 x performance ratio."""
+    kwh_day = (sun or {}).get("annual_kwh_m2_day")
+    use, per_kwp, pr = r.get("usable_roof_share", 0.6), r.get("m2_per_kwp", 6), r.get("performance_ratio", 0.75)
+
+    def system(roof_m2: float) -> dict:
+        kwp = roof_m2 * use / per_kwp
+        kwh = kwp * kwh_day * 365 * pr if kwh_day else None
+        cost = kwp * r.get("cost_usd_per_kwp", 800)
+        saving = kwh * r.get("tariff_usd_per_kwh", 0.2) if kwh else None
+        return {"roof_m2": round(roof_m2), "kwp": round(kwp, 1), "kwh_per_year": round(kwh) if kwh else None,
+                "cost_usd": round(cost), "saving_usd_per_year": round(saving) if saving else None,
+                "payback_years": round(cost / saving, 1) if saving else None}
+
+    target = None
+    if buildings:  # the roof under the pin, or the nearest one within 30 m
+        i = min(range(len(b_utm)), key=lambda k: b_utm[k].distance(center_utm))
+        if b_utm[i].distance(center_utm) <= 30:
+            target = system(buildings[i].area_m2)
+    with_panels = sum(b.props.get("has_solar", False) for b in buildings)
+    return {
+        "sunshine_kwh_m2_day": kwh_day,
+        "sunshine": (sun or {}).get("source", "unavailable (offline)"),
+        "good_sunshine": bool(kwh_day and kwh_day >= r.get("good_sun_kwh_m2_day", 4.5)),
+        "building_at_pin": target,
+        "area_buildings": len(buildings),
+        "area_buildings_with_panels": with_panels,
+        "area_adoption_pct": round(100 * with_panels / len(buildings), 1) if buildings else 0.0,
+        "area_potential": system(sum(b.area_m2 for b in buildings)) if buildings else None,
+        "assumptions": {k: r.get(k) for k in ("usable_roof_share", "m2_per_kwp", "performance_ratio",
+                                              "cost_usd_per_kwp", "tariff_usd_per_kwh")},
+    }
+
 @register("solar_minigrid")
 def solar_minigrid(ctx: AnalysisContext):
     p = ctx.params
@@ -551,6 +585,7 @@ def solar_minigrid(ctx: AnalysisContext):
         verdict = "STANDALONE_SOLAR_RECOMMENDED"
 
     summary = {
+        "rooftop": rooftop_solar(buildings, b_utm, center_utm, ctx.layers.get("nasa_power"), p.get("rooftop", {})),
         "rings": rings,
         "distance_center_to_power_line_m": grid_dist,
         "water_tanks_detected": len(tanks),
@@ -561,3 +596,130 @@ def solar_minigrid(ctx: AnalysisContext):
     features = ([b.to_feature() for b in buildings] + [d.to_feature() for d in panels + tanks]
                 + ring_features + _layer_features(lines, "power_line"))
     return summary, features
+
+
+# ---------------------------------------------------------- densification
+def _floors(props: dict, metres_per_floor: float) -> Optional[float]:
+    """Floors from Overture's num_floors or height, when the footprint data has them."""
+    if props.get("num_floors"):
+        return float(props["num_floors"])
+    if props.get("height"):
+        return max(1.0, float(props["height"]) / metres_per_floor)
+    return None
+
+
+@register("densification")
+def densification(ctx: AnalysisContext):
+    p, epsg = ctx.params, settings.utm_epsg
+    baseline = ctx.layers.get("buildings_baseline", [])
+    sam = _by_class(ctx.detections, "building")
+    base_geoms = [shape(f["geometry"]) for f in baseline if f["geometry"]["type"] == "Polygon"]
+    base_tree = STRtree(base_geoms) if base_geoms else None
+    for d in sam:  # a roof SAM sees that the footprint data doesn't have = built (or rebuilt) recently
+        d.props["new_since_baseline"] = bool(base_tree is not None and not any(
+            d.geometry.intersection(base_geoms[int(j)]).area >= 0.2 * d.geometry.area for j in base_tree.query(d.geometry)))
+    floor_by_geom = {id(g): _floors(f.get("properties", {}), p.get("metres_per_floor", 3))
+                     for g, f in zip(base_geoms, [f for f in baseline if f["geometry"]["type"] == "Polygon"])}
+    buildings = combine_with_baseline(sam, baseline)
+    audit = geo.to_utm(box(*ctx.bounds), epsg)
+    area_ha = audit.area / 1e4
+    utm = [geo.to_utm(b.geometry, epsg) for b in buildings]
+    covered = unary_union(utm).intersection(audit).area if utm else 0.0
+    coverage = 100 * covered / audit.area
+    floors = [f for f in floor_by_geom.values() if f]
+    avg_floors = sum(floors) / len(floors) if floors else None
+    sizes = sorted(b.area_m2 for b in buildings)
+    roads = [f for f in ctx.layers.get("osm_roads", []) if f["geometry"]["type"] == "LineString"]
+    road_utm = [geo.to_utm(shape(f["geometry"]), epsg) for f in roads]
+    road_km = sum(g.intersection(audit).length for g in road_utm) / 1000
+    centre = geo.to_utm(Point(*ctx.center), epsg)
+    major = [g for g, f in zip(road_utm, roads) if f["properties"].get("highway") in p.get("major_roads", [])]
+    paved = [g for g, f in zip(road_utm, roads) if f["properties"].get("surface") in ("asphalt", "paved", "concrete")]
+    bands = p.get("coverage_bands", {"low": 25, "high": 50})
+    per_ha = len(buildings) / area_ha
+    verdict = ("DENSE - little open land" if coverage > bands["high"] or per_ha > p.get("dense_buildings_per_ha", 80)
+               else "LOW_DENSITY - room to build" if coverage < bands["low"] else "MEDIUM_DENSITY")
+    summary = {
+        "area_ha": round(area_ha, 1),
+        "buildings": len(buildings),
+        "buildings_per_ha": round(len(buildings) / area_ha, 1),
+        "ground_coverage_pct": round(coverage, 1),
+        "open_land_pct": round(100 - coverage, 1),
+        "median_footprint_m2": round(sizes[len(sizes) // 2]) if sizes else None,
+        "new_since_baseline": sum(d.props["new_since_baseline"] for d in sam),
+        "floors_known_for_pct": round(100 * len(floors) / len(base_geoms), 1) if base_geoms else 0.0,
+        "avg_floors_where_known": round(avg_floors, 1) if avg_floors else None,
+        "floor_area_ratio_est": round(coverage / 100 * avg_floors, 2) if avg_floors else None,
+        "road_km_per_km2": round(road_km / (audit.area / 1e6), 1),
+        "distance_to_major_road_m": round(min(g.distance(centre) for g in major)) if major else None,
+        "paved_road_share_pct": round(100 * sum(g.length for g in paved) / sum(g.length for g in road_utm), 1) if road_utm else None,
+        "verdict": verdict,
+        "note": "Allowed ground coverage and plot ratio depend on the Nairobi zoning zone: check with the county.",
+    }
+    if not baseline:
+        summary["warning"] = "No building footprint data for this area: counts rely on SAM alone and miss dense roofs."
+    feats = [b.to_feature() for b in buildings] + _layer_features(roads, "road")
+    return summary, feats
+
+
+# ------------------------------------------------------------ business site
+def _tag_match(props: dict, tags: Sequence[str]) -> bool:
+    """True if the OSM properties match any "key=value" (or "key=*") in tags."""
+    for t in tags:
+        k, _, v = t.partition("=")
+        if k in props and (v in ("*", "") or str(props[k]) == v):
+            return True
+    return False
+
+
+def business_verdict(people_per_competitor: float, p: dict) -> str:
+    bands = p.get("people_per_competitor", {"strong": 3000, "crowded": 800})
+    return ("STRONG_OPPORTUNITY" if people_per_competitor >= bands["strong"] else
+            "CROWDED" if people_per_competitor < bands["crowded"] else "MODERATE")
+
+
+@register("business_site")
+def business_site(ctx: AnalysisContext):
+    p, epsg = ctx.params, settings.utm_epsg
+    centre = geo.to_utm(Point(*ctx.center), epsg)
+    r = p.get("catchment_m", 500)
+    buildings = combine_with_baseline(_by_class(ctx.detections, "building"), ctx.layers.get("buildings_baseline", []))
+    homes = [b for b in buildings if geo.to_utm(b.geometry.centroid, epsg).distance(centre) <= r]
+    near = []
+    for f in ctx.layers.get("osm_pois", []):
+        d = geo.to_utm(shape(f["geometry"]), epsg).distance(centre)
+        if d <= r:
+            near.append((f, round(d)))
+    tags = p.get("competitor_tags") or []
+    competitors = sorted([(f, d) for f, d in near if tags and _tag_match(f["properties"], tags)], key=lambda x: x[1])
+    anchors = {k: [(f, d) for f, d in near if _tag_match(f["properties"], v)] for k, v in p.get("anchors", {}).items()}
+    people = len(homes) * p.get("people_per_building", 4)
+    per_comp = round(people / (len(competitors) + 1))  # +1: the new business shares the customers too
+    roads = [f for f in ctx.layers.get("osm_roads", []) if f["geometry"]["type"] == "LineString"]
+    major = [geo.to_utm(shape(f["geometry"]), epsg) for f in roads if f["properties"].get("highway") in p.get("major_roads", [])]
+    verdict = business_verdict(per_comp, p) if tags else "NEEDS_BUSINESS_TYPE - say what kind of business"
+    summary = {
+        "business": p.get("business"),
+        "competitor_tags": tags,
+        "catchment_m": r,
+        "buildings_in_catchment": len(homes),
+        "people_in_catchment_est": people,
+        "competitors": len(competitors),
+        "competitors_nearest": [{"name": f["properties"].get("name") or "(unnamed)", "distance_m": d} for f, d in competitors[:8]],
+        "people_per_competitor_est": per_comp if tags else None,
+        "anchors": {k: len(v) for k, v in anchors.items()},
+        "distance_to_major_road_m": round(min(g.distance(centre) for g in major)) if major else None,
+        "verdict": verdict,
+        "assumptions": {"people_per_building": p.get("people_per_building", 4),
+                        "map_data": "OpenStreetMap: small and informal businesses are often missing"},
+    }
+    if not ctx.layers.get("osm_pois"):
+        summary["warning"] = "No places layer - run: python scripts/fetch_data.py pois"
+    ring = geo.to_wgs84(centre.buffer(r), epsg)
+    feats = ([b.to_feature() for b in homes]
+             + [{"type": "Feature", "geometry": f["geometry"], "properties": {"class": "competitor", "distance_m": d,
+                 **f["properties"]}} for f, d in competitors]
+             + [{"type": "Feature", "geometry": f["geometry"], "properties": {"class": "anchor", "kind": k, "distance_m": d,
+                 **f["properties"]}} for k, v in anchors.items() for f, d in v]
+             + [{"type": "Feature", "geometry": mapping(ring), "properties": {"class": "catchment", "radius_m": r}}])
+    return summary, feats
