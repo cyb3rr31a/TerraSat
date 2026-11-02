@@ -1,16 +1,47 @@
-# TerraSat: Geospatial Auditing Engine for Kenyan Planning
+# TerraSat: Urban Planning Assistant on a Geospatial Auditing Engine
 
-*Spec v3 (Oct 27, 2026). TerraSat is a general-purpose engine. Urban flood exposure is the case study we demo.*
+*Spec v5 (Oct 31, 2026). TerraSat is an urban planning assistant for people who build, invest or open businesses: ask anything about a place and get the analysis that fits the question, with the satellite picture. Main users: developers, businesses and real-estate firms (web app); people on the ground add reports and answers (phone app).*
+
+## 0. The Ask engine (v5)
+
+```
+question ("Is this a good spot for a pharmacy?") + place (named, map pin, or phone GPS)
+  → Muse Spark routes: use case (business_site | solar_minigrid | densification | flood | general),
+    place name, business type and competitor OSM tags
+  → Nominatim finds a named place (a named place beats the pin)
+  → quick audit of that profile on a small square (ask_side_m: 500-1000 m; cached)
+      satellite picture + SAM + the profile's layers and rules → summary + overlay.jpg (findings drawn on)
+  → ground truth: reports and quick-question answers for that use case nearby (+ flood facts for flood)
+  → Muse Spark answers: one-line verdict, key numbers, what to check on the ground (web for laws, prices, tariffs)
+  → reply + highlights (cards) + picture + GeoJSON; a quick question for people on site
+```
+
+| Use case (profile) | Data | Verdict |
+|---|---|---|
+| **Business site** (`business_site`) | Competitors from Google Maps (Places API (New) Text Search, up to 60, live, never cached; listed with credit, not drawn on our maps per Google's terms) plus OSM shops/services (`fetch_data.py pois`), roofs within 500 m (SAM + Overture), major roads | STRONG_OPPORTUNITY / MODERATE / CROWDED by people per competitor (people ≈ 4 per roof, assumption) |
+| **Solar viability** (`solar_minigrid`) | Roof under the pin (SAM), NASA POWER climatology sunshine, panels on neighbours' roofs, power lines | kWp, kWh/yr, payback (cost and tariff marked as assumptions), plus grid / mini-grid context |
+| **Densification** (`densification`) | Roofs (SAM + Overture, downloaded on demand for any area), floors where Overture has them, roads | Ground coverage, buildings/ha, new since baseline, FAR estimate; DENSE / MEDIUM / LOW_DENSITY |
+| **Flood** (`flood`) | Everything in §3 plus the place check | Risk class, flood history, riparian reserve |
+
+- **Crews and tasks were removed (Oct 31):** the product serves people who build and invest, not emergency logistics. Reports stay as ground truth; statuses are received / corroborated / unconfirmed / resolved / dismissed.
 
 - **Hackathon:** Meta Global AI Developer Hackathon, Indie Developer Track, "Build for Your World"
 - **Deadline:** Nov 4, 11:59 PM PT = **Thu Nov 5, 10:59 AM Nairobi time** (US clocks move to PST on Nov 1)
-- **Tagline:** *TerraSat: ask planning questions of satellite imagery. Case study: Nairobi flood exposure before El Niño.*
+- **Tagline:** *TerraSat: know a place before you buy, build or plan. Case study: flood risk in Nairobi.*
 
 ---
 
 ## 1. What TerraSat is
 
-TerraSat lets planners ask a question about a place and get an answer from current satellite imagery, in seconds rather than weeks of field audits.
+TerraSat answers "what is this place really like?" for **home buyers, developers, agents, lenders and insurers, county planners and residents**, in seconds rather than weeks of field audits. Emergencies are one use; everyday land decisions are the larger one.
+
+Three sources of truth, combined:
+
+- **Satellite imagery and map layers** (SAM 3.1, OSM, building footprints, elevation, UNOSAT's 2024 flood record).
+- **News and official records** (past floods, the Interior Ministry's at-risk list), found by Muse Spark.
+- **People on the ground:** voice reports and quick tap-to-answer questions in the chat. These close the gap where maps and satellites are wrong or out of date.
+
+The engine underneath:
 
 ```
 pin or voice command
@@ -99,7 +130,7 @@ Kenya Met puts an 81% chance on this year's El Niño being *very strong*, with a
 2. **Where will water back up?** Which culverts, drains and river crossings are likely choke points.
 3. **What are residents seeing right now?** In-app voice reports of blocked drains and rising water, checked against satellite imagery.
 
-**Framing:** the tool is for protection, not enforcement. Its outputs are evacuation priority, drains to clear and where to stage relief, never a list of homes to demolish.
+**Framing:** information for decisions and protection, not enforcement. Buyers learn whether a plot floods or sits in a riparian reserve; officers learn which drains to clear and whom to warn. Risk describes a place, never the people who live there; outputs are never a list of homes to demolish.
 
 ### F1: Flood exposure audit
 
@@ -185,20 +216,26 @@ A choke point is where water has to pass under a road, through a culvert or unde
 - **Source check:** each item records whether its source URL is one Muse Spark actually opened (`source_verified`).
 - **Evidence only:** used in memos, audit summaries and report context ("past floods within 1 km"). It's left out of risk scores because news coverage favours places reporters reach, and places are only accurate to neighbourhood level.
 
-### F3: Citizen reports and crew tasks (mobile app) *(to do)*
+### F3: Reports (mobile app) ✅
 
-- **The app:** the **TerraSat mobile app** (Expo / React Native, Android first), which has two modes (details in §6a).
-- **Residents:** one record button; GPS and an optional photo attach automatically. Reports are **queued offline** and sent when the connection returns.
-- **Field crews:** see drains assigned to them, navigate there, and mark them cleared with an after photo.
-- **Audio:** the phone records in its native format (AAC/M4A on Android). The backend converts it to **WAV**, the only format the transcription API accepts, with ffmpeg via `imageio-ffmpeg`.
+- **The app:** the **TerraSat mobile app** (Expo SDK 58, Android first), with two tabs: **Ask** (§0, about where you stand) and **Report**.
+- **Report:**
+  - one record button, with GPS and an optional photo attached automatically;
+  - reports are **queued offline** (the audio is kept in the app's documents folder) and sent when the connection returns;
+  - `client_id` stops duplicates.
 - **Pipeline:**
-  1. `muse-voice-transcribe-1.0` transcribes the recording.
-  2. Muse Spark extracts the issue type, landmark and urgency.
-  3. The landmark is geocoded.
-  4. SAM checks the imagery at that spot.
-  5. The report appears on the map with a "verified by imagery" badge and feeds into the F2 ranking.
+  1. Any phone audio is converted to WAV.
+  2. `muse-voice-transcribe-1.0` transcribes it.
+  3. Muse Spark picks the type, place, urgency and EN/SW summary.
+  4. The location comes from GPS; with no GPS, from a known place named in the note.
+  5. The report is corroborated against the profile's layers when the profile has them.
+- **Report types come from the audit profiles (`reports.types`), plus a few general ones:**
+  - **flood:** flooding, water that stays for days, blocked drain, river overflow, road impassable in rain, collapsed bridge, garbage, new building near a river, cracks or sinking ground;
+  - **solar:** power outage, weak power, no connection;
+  - **general:** water supply, sewage, damaged road, streetlight, other.
+  - Flood types are corroborated (river distance, height, 2024 flood); others are `received`.
+  - Crime and safety reports are deliberately left out.
 - **Roadmap:** SMS, USSD and phone-call reporting, which work without mobile data.
-- **Other profiles:** the reporting flow is generic. In the solar profile the same flow would take outage reports.
 
 ### F4: Grounded memo ✅
 
@@ -209,6 +246,26 @@ A choke point is where water has to pass under a road, through a culvert or unde
 - **Grounding and sources:** it uses only the given data and pages it cites. The sources (web citations plus past-incident URLs) are listed under the memo.
 - **Framing:** protection, not enforcement.
 - **Output:** saved as `memo_<lang>.md` next to the audit and cached until `refresh=true`.
+
+### F6: Place check and chat ✅
+
+- **`POST /check`** scores any spot exactly like a building in an audit:
+  - flood risk class (same rules, including DEM drainage lines and the surface-water flag);
+  - distance to and height above the nearest watercourse;
+  - inside the 30 m riparian reserve or not;
+  - inside the 2024 flood (or not visible);
+  - past floods within 1.5 km (news is placed at neighbourhood level);
+  - reports within 300 m and neighbours' answers within 150 m.
+  - It runs in under a second.
+- **`POST /chat`** (mobile **Ask** tab):
+  - Muse Spark works out whether the person named a place; Nominatim finds it, otherwise the phone's location is used;
+  - Muse Spark answers in English or Swahili from the check data, using the web only for laws and news, with citations;
+  - it never calls a place "safe" and tells buyers to check the title and the riparian boundary with the Water Resources Authority, and to visit after rain.
+- **Quick questions (ground truth):**
+  - each profile lists tap-to-answer questions; flood asks "Did this street flood last rainy season? (no / ankle / knee / waist)", "How long does water stay?" and "Can cars pass when it rains?";
+  - they are only asked of people who share their location, so answers describe where they stand;
+  - answers are aggregated into "neighbours say" in every later check.
+- **Riparian reserve:** 6–30 m from the highest water mark (EMCA (Water Quality) Regulations 2006); the government enforces 30 m along the Nairobi Rivers (Interior Ministry, May 2024), upheld by the Environment and Land Court (March 2026). TerraSat uses 30 m.
 
 ### F5: Exports ✅
 
@@ -271,9 +328,8 @@ This fixes the original spec's flaw that "no solar panel" doesn't mean "unserved
 
 | App | Tech | Users | What it does |
 |---|---|---|---|
-| **TerraSat mobile** (`mobile/`) | Expo / React Native, Android first, demoed with Expo Go | **Residents** | Record a voice report (GPS + optional photo attached), offline queue, track status (received → verified by imagery → crew assigned → cleared), see nearby risk |
-| | | **Field crews** | List of assigned drains / choke points, map and navigation, mark cleared with an after photo |
-| **TerraSat dashboard** (`dashboard/`) | React (Vite) + react-leaflet, web | County / Red Cross monitoring and logistics teams | Audit map and layers, use-case switcher, live report feed, choke-point ranking, **assign crews and track tasks**, grounded memo, exports |
+| **TerraSat web** (`web/`) | React (Vite) + react-leaflet | **Developers, businesses, real-estate firms, planners** (main app) | Ask about any place: chat beside a map; the satellite picture with findings; highlights; memo and exports |
+| **TerraSat mobile** (`mobile/`) | Expo / React Native, Android first, Expo Go | **People on the ground** | Ask about where you stand; quick questions; voice reports with offline queue |
 
 - **Both apps call the same FastAPI backend.**
 - **Streamlit is dropped to save time.** The API's built-in `/docs` page covers backend testing.
@@ -286,8 +342,7 @@ This fixes the original spec's flaw that "no solar panel" doesn't mean "unserved
 | `POST /audit` | Run an audit (profile, lon, lat) and return the summary + GeoJSON |
 | `POST /reports` | Multipart upload: audio, lat/lon, optional photo, device id. The pipeline runs: convert to WAV → transcribe → Muse Spark parses → geocode → SAM checks the imagery |
 | `GET /reports` | Report feed for the dashboard (filter by status or area); a reporter's own reports for the mobile app |
-| `POST /tasks`, `PATCH /tasks/{id}` | Assign a choke point or report to a crew; status updates and after photos from the crew app |
-| `GET /tasks?crew=` | A crew's assigned tasks for the mobile app |
+| `POST /ask` | The Ask engine (§0) |
 | `GET /audit/{id}/choke-points` | Choke points ranked with the latest reports (`format=csv` to export) |
 | `POST /audit/{id}/memo` | Muse Spark memo with sources, `lang=en|sw` |
 
@@ -296,7 +351,7 @@ This fixes the original spec's flaw that "no solar panel" doesn't mean "unserved
 ## 6. Architecture
 
 ```
-TerraSat mobile (Expo) ──┐  residents: voice reports · crews: tasks
+TerraSat mobile (Expo) ──┐  ask · quick questions · voice reports
 TerraSat dashboard (web) ┼─► FastAPI (backend/app/main.py)
                          │      /profiles  /audit  /reports  /tasks
                          ▼
@@ -311,7 +366,7 @@ stitch, cache      parse, dedup, cache   (waterways, power,    solar_minigrid, �
    └──────────── geo.py: tile math, pixel↔GPS, UTM, buffers, NMS ─────────┘
 
 profiles/*.yaml   ← one file per use case (what to find, layers, rules, memo)
-reports.py: voice pipeline, crews and tasks (SQLite) · audit.py: memo · analyzers.py: choke points
+assistant.py: Ask engine · reports.py: reports + answers (SQLite) · audit.py: cached audits, memo · analyzers.py: four analyzers + choke points
 ```
 
 **Rules**
@@ -335,10 +390,10 @@ reports.py: voice pipeline, crews and tasks (SQLite) · audit.py: memo · analyz
 
 | Time | Scene |
 |---|---|
-| 0:00–0:15 | Hook: the El Niño warning, the 2024 Nairobi floods. "TerraSat asks planning questions of satellite imagery." |
-| 0:15–1:40 | **Flood case study in Mathare:** on the **dashboard**, SAM masks light up, the riparian buffer appears, new structures are flagged. On the **phone**, a resident records "the drain by the bridge is blocked"; the report appears on the dashboard, verified by imagery. Choke points are ranked and the officer **assigns a crew**. On the **crew's phone**, they navigate there and mark it cleared with a photo. The bilingual memo with citations, then GeoJSON export. |
-| 1:40–1:55 | **Same engine, different question:** switch the profile to Solar & Mini-grid on Syokimau. Rings, solar penetration, grid distance and cost per household appear. No code change. |
-| 1:55–2:00 | Roadmap: heat islands, property rates, fire access, rural flood plains… "One engine, any planning question." |
+| 0:00–0:15 | Hook: "Before you build, buy or open a shop, you need to know the place. In Nairobi that knowledge is scattered or missing." |
+| 0:15–1:30 | **Web app, four questions on the map:** "Is this a good spot for a pharmacy?" (competitors and anchors light up), "Can I put solar on this roof?" (roof, kWh, payback), "How built-up is Kilimani?" (roofs coloured, new construction in purple), "Does South C flood?" (risk colours, 2024 flood, past floods, riparian reserve). Each answer has a verdict, cards and the satellite picture. |
+| 1:30–1:50 | **Ground truth:** on the phone, someone answers "did this street flood last season? knee deep" and sends a voice report; the next answer on the web cites what neighbours say. Swahili toggle. |
+| 1:50–2:00 | "One engine, any planning question": the profiles list, roadmap. |
 
 **Presets**
 
@@ -356,15 +411,16 @@ Swap any site with poor imagery.
 | Wed Oct 28 | ✅ Milestone 1: live checks, first live Mathare audit, prompt tests (SAM misses informal roofs → Overture footprints fill the gaps; 1,665 structures in the Mathare riparian zone). ✅ Scripts consolidated to `fetch_data.py`, `run_audit.py`, `check.py`. |
 | Thu Oct 29 | ✅ Terrain (height above river, dips, flow paths, DEM drainage lines), risk rules validated on 2024 damage at three sites. ✅ **API:** `/audit` (cached), `/reports` (voice → WAV → Muse Voice → Muse Spark parse with Nairobi place names → corroboration against river distance, height and 2024 floods), `/crews`, `/tasks` (the full loop from resident to crew to cleared), SQLite. |
 | Fri Oct 30 | ✅ Drainage choke points (mapped and flow-path crossings, live re-ranking with reports, checked against 2024). ✅ Flood history layer (Muse Spark web search + Nominatim, evidence only). ✅ Muse Spark memo (EN/SW, sources, KMD 7-day outlook). ✅ CSV exports. 47 tests passing. |
-| Sat Oct 31 | **Mobile app, resident mode:** record, GPS, photo, offline queue, my reports and status. |
-| Sun Nov 1 | **Mobile app, crew mode:** assigned tasks, map and navigation, mark cleared with a photo. Nearby-risk view. |
-| Mon Nov 2 | **Web dashboard:** map and layers, use-case switcher, report feed, task board, memo panel. |
-| Tue Nov 3 | Solar profile live run on Syokimau. Public backend URL (tunnel or deploy). Cache all presets, rehearse. |
+| Fri Oct 30 (later) | ✅ Mobile app (Expo SDK 58): voice reports with offline queue; place check, quick questions, profile-driven report types; riparian citation. |
+| Sat Oct 31 | ✅ **Pivot to a planning assistant (§0):** Ask engine with routing, two new profiles (densification, business site), rooftop solar (NASA POWER), findings drawn on the picture, on-demand Overture footprints; crews removed; mobile Ask shows picture and cards. |
+| Sun Nov 1 | **Web app:** chat beside a map, satellite picture overlay, highlights, place search and pin. |
+| Mon Nov 2 | Web polish (memo, exports, EN/SW), live runs of all four use cases on demo places. |
+| Tue Nov 3 | Public backend URL (tunnel or deploy). Cache demo places, rehearse. |
 | Wed Nov 4 | Record the video, final README, submit (Thu 10:59 AM Nairobi time). |
 
 ## 10. Open questions
 
 - Swahili/Sheng support in `muse-voice-transcribe-1.0`, and whether web search works with image input. Test with `python scripts/check.py voice --audio …`.
 - Hackathon rules: video length, public repo or live URL, licence, whether non-Meta inference is allowed.
-- The legal riparian buffer width and its citation.
+- ~~The legal riparian buffer width and its citation.~~ Resolved: see F6.
 - Network: the Claude sandbox can't reach Mapbox, Overpass or the Meta API. Run scripts locally, or allow those domains in Claude settings under Capabilities.
