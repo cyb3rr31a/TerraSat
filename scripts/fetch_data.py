@@ -8,6 +8,7 @@ Layers:
   waterways, roads, power_lines  OpenStreetMap via the Overpass API
   pois                           Shops, services, schools, clinics, markets and bus stops (OpenStreetMap),
                                  for the business-site profile
+  places                         Suburb and neighbourhood names (OpenStreetMap), for place search in the apps
   buildings                      Overture Maps footprints around each demo site
   terrain                        Copernicus GLO-30 elevation tile(s) covering the demo sites
   flood_2024                     UNOSAT 2024 flood mapping, cut to each demo site. Download
@@ -51,7 +52,13 @@ OSM_LAYERS = {
                     ["power", "voltage", "name", "operator"]),
 }
 POI_TAGS = ["name", "amenity", "shop", "office", "healthcare", "public_transport", "highway", "leisure", "tourism"]
-ALL = [*OSM_LAYERS, "pois", "buildings", "terrain", "flood_2024", "flood_history"]
+# point layers: layer -> (TerraSat layer name, Overpass selectors, tags to keep)
+POINT_LAYERS = {
+    "pois": ("osm_pois", ["nwr[shop]", "nwr[amenity]", "nwr[office]", "node[highway=bus_stop]", "node[public_transport]"],
+             POI_TAGS),
+    "places": ("osm_places", ['node[place~"^(suburb|neighbourhood|quarter|village|locality)$"]'], ["name", "place"]),
+}
+ALL = [*OSM_LAYERS, *POINT_LAYERS, "buildings", "terrain", "flood_2024", "flood_history"]
 FLOOD_SITES = ("mathare", "mukuru", "kibera", "korogocho", "east_cluster")
 SITE_HALF_DEG = 0.0105  # ~1.2 km each way: covers the 2.1 km audit square
 
@@ -100,15 +107,15 @@ def fetch_osm(name, force=False):
     print(f"{name}: {len(gj['features'])} features")
 
 
-def fetch_pois(force=False):
-    """Every shop, service and public facility in Nairobi as points (ways as their centre)."""
-    dst = layer_path("osm_pois")
+def fetch_points(name, force=False):
+    """A point layer for all of Nairobi (ways become their centre point)."""
+    layer, selectors, keep = POINT_LAYERS[name]
+    dst = layer_path(layer)
     if dst.exists() and not force:
-        return print("pois: already downloaded")
+        return print(f"{name}: already downloaded")
     s, w, n, e = NAIROBI_BBOX
-    query = (f"[out:json][timeout:240];\n(\n  nwr[shop]({s},{w},{n},{e});\n  nwr[amenity]({s},{w},{n},{e});\n"
-             f"  nwr[office]({s},{w},{n},{e});\n  node[highway=bus_stop]({s},{w},{n},{e});\n"
-             f"  node[public_transport]({s},{w},{n},{e});\n);\nout center tags;")
+    body = "\n".join(f"  {sel}({s},{w},{n},{e});" for sel in selectors)
+    query = f"[out:json][timeout:240];\n(\n{body}\n);\nout center tags;"
     with httpx.Client(timeout=300, headers={"User-Agent": "TerraSat/0.4 (hackathon)"}) as c:
         for url in OVERPASS_URLS:
             try:
@@ -119,7 +126,7 @@ def fetch_pois(force=False):
             except (httpx.HTTPError, ValueError) as err:
                 print(f"  {url} failed ({err.__class__.__name__}), trying the next server...")
         else:
-            raise RuntimeError("pois: all Overpass servers are busy - try again later")
+            raise RuntimeError(f"{name}: all Overpass servers are busy - try again later")
     feats = []
     for el in elements:
         lat, lon = el.get("lat") or el.get("center", {}).get("lat"), el.get("lon") or el.get("center", {}).get("lon")
@@ -127,10 +134,10 @@ def fetch_pois(force=False):
             continue
         tags = el.get("tags", {})
         feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                      "properties": {"osm_id": f"{el['type']}/{el['id']}", **{k: tags[k] for k in POI_TAGS if k in tags}}})
+                      "properties": {"osm_id": f"{el['type']}/{el['id']}", **{k: tags[k] for k in keep if k in tags}}})
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps({"type": "FeatureCollection", "features": feats}), encoding="utf-8")
-    print(f"pois: {len(feats)} places")
+    print(f"{name}: {len(feats)} places")
 
 
 def site_bbox(site):
@@ -292,8 +299,8 @@ def main():
                 cut_flood_2024(a.force)
             elif name == "flood_history":
                 fetch_flood_history(a.force)
-            elif name == "pois":
-                fetch_pois(a.force)
+            elif name in POINT_LAYERS:
+                fetch_points(name, a.force)
             else:
                 fetch_osm(name, a.force)
         except (RuntimeError, ValueError, httpx.HTTPError) as e:
