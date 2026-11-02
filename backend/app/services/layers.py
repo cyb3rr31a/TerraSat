@@ -32,7 +32,56 @@ LAYER_FILES: dict[str, str] = {
     # Past flood incidents from news and official statements (Muse Spark web search),
     # placed at neighbourhood level - evidence for memos and reports, not a score input
     "flood_history": "nairobi_flood_history.geojson",
+    # shops, services, schools, clinics, markets, bus stops (OpenStreetMap points)
+    "osm_pois": "nairobi_pois.geojson",
 }
+# Layers fetched for the exact spot when an audit needs them (cached in data/cache):
+#   nasa_power - long-term solar radiation (NASA POWER climatology, kWh/m2/day)
+LIVE_LAYERS = {"nasa_power"}
+
+
+def solar_radiation(lon: float, lat: float) -> dict | None:
+    """Long-term average sunshine at a spot from NASA POWER (free, no key), cached per ~10 km cell.
+    Returns {"annual_kwh_m2_day", "monthly_kwh_m2_day"} or None when offline."""
+    import httpx
+    cache = Path(settings.cache_dir) / "nasa_power" / f"{lat:.1f}_{lon:.1f}.json"
+    if not cache.exists():
+        try:
+            r = httpx.get("https://power.larc.nasa.gov/api/temporal/climatology/point", timeout=30,
+                          params={"parameters": "ALLSKY_SFC_SW_DWN", "community": "RE", "format": "JSON",
+                                  "longitude": round(lon, 1), "latitude": round(lat, 1)})
+            r.raise_for_status()
+        except httpx.HTTPError:
+            return None
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(r.text)
+    values = json.loads(cache.read_text())["properties"]["parameter"]["ALLSKY_SFC_SW_DWN"]
+    months = {k: v for k, v in values.items() if k != "ANN"}
+    annual = values.get("ANN", sum(months.values()) / max(len(months), 1))
+    return {"annual_kwh_m2_day": round(annual, 2), "monthly_kwh_m2_day": months,
+            "source": "NASA POWER climatology (all-sky surface shortwave radiation)"}
+
+
+def overture_buildings(bounds: tuple[float, float, float, float]) -> list[dict]:
+    """Footprints for any area: the downloaded site files, or a one-off Overture download for
+    this area (needs the `overturemaps` package and internet), cached in data/raw/buildings/."""
+    have = load_layer("buildings_baseline", bounds)
+    if have:
+        return have
+    import hashlib
+    import subprocess
+    import sys
+    w, s, e, n = bounds
+    folder = layer_path("buildings_baseline")
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / f"area_{hashlib.sha1(f'{w:.4f},{s:.4f}'.encode()).hexdigest()[:10]}.geojson"
+    try:
+        subprocess.run([sys.executable, "-m", "overturemaps", "download", f"--bbox={w:.5f},{s:.5f},{e:.5f},{n:.5f}",
+                        "-f", "geojson", "--type=building", "-o", str(dst)], check=True, capture_output=True, timeout=150)
+    except (subprocess.SubprocessError, OSError):
+        dst.unlink(missing_ok=True)
+        return []
+    return load_layer("buildings_baseline", bounds)
 
 
 def layer_path(name: str) -> Path:
@@ -99,5 +148,15 @@ def load_dem(bounds: tuple[float, float, float, float], pad_deg: float = 0.02) -
 
 
 def load_layers(names: Iterable[str], bounds) -> dict:
-    """Vector layers come back as lists of GeoJSON features; the DEM as a Dem."""
-    return {n: load_dem(bounds) if n == "copernicus_dem" else load_layer(n, bounds) for n in names}
+    """Vector layers come back as lists of GeoJSON features; the DEM as a Dem; sunshine as a dict."""
+    cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+
+    def one(n):
+        if n == "copernicus_dem":
+            return load_dem(bounds)
+        if n == "nasa_power":
+            return solar_radiation(cx, cy)
+        if n == "buildings_baseline":
+            return overture_buildings(bounds)
+        return load_layer(n, bounds)
+    return {n: one(n) for n in names}
