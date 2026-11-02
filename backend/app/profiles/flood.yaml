@@ -56,3 +56,43 @@ memo:
   sections: [Risk summary, This week's rain outlook, Drains and crossings to clear first,
              Where to warn and evacuate first, What residents are reporting, Data limits]
   languages: [en, sw]
+
+# What people can report for this use case (Muse Spark sorts each voice note into
+# one of these) and the quick questions the chat asks people standing at a place,
+# which build a street-level flood history no satellite can see.
+reports:
+  corroborate: true           # checked against river distance, height and the 2024 flood
+  types:
+    flooding:           [Flooding, Mafuriko]
+    standing_water:     [Water that stays for days, Maji yanayokaa kwa siku]
+    blocked_drain:      [Blocked drain, Mtaro umeziba]
+    river_overflow:     [River overflow, Mto umefurika]
+    road_impassable:    [Road impassable in rain, Barabara haipitiki mvua ikinyesha]
+    collapsed_bridge:   [Collapsed bridge or culvert, Daraja au kalvati limeanguka]
+    garbage:            [Garbage or dumping, Taka au utupaji]
+    riverbank_building: [New building near a river, Ujenzi mpya karibu na mto]
+    ground_cracks:      ["Cracks, erosion or sinking ground", "Nyufa, mmomonyoko au ardhi kuzama"]
+
+questions:
+  - id: flooded_last_season
+    en: Did this street flood in the last rainy season?
+    sw: Je, mtaa huu ulifurika msimu wa mvua uliopita?
+    options:
+      "no":  ["No", Hapana]
+      ankle: [Ankle deep, Hadi kifundo cha mguu]
+      knee:  [Knee deep, Hadi goti]
+      waist: [Waist deep or more, Hadi kiuno au zaidi]
+  - id: water_stays
+    en: After heavy rain, how long does water stay here?
+    sw: Baada ya mvua kubwa, maji hukaa hapa kwa muda gani?
+    options:
+      none:  [It drains quickly, Hukauka haraka]
+      hours: [A few hours, Saa chache]
+      days:  [A day or more, Siku moja au zaidi]
+  - id: road_passable
+    en: Can cars use the roads here when it rains heavily?
+    sw: Je, magari hupita barabara za hapa mvua kubwa ikinyesha?
+    options:
+      "yes":     ["Yes", Ndiyo]
+      sometimes: [Sometimes, Wakati mwingine]
+      "no":      ["No", Hapana]

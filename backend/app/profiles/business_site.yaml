@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# Audit profile: Business Site Suitability
+# "Is this a good spot for a pharmacy / hardware / salon?" Competitors and
+# anchors from OpenStreetMap, customers nearby from rooftops, and road access.
+# ---------------------------------------------------------------------------
+id: business_site
+name: Business Site Suitability
+tagline: Is this a good spot for my business? Competitors, customers nearby, anchors and access.
+status: beta
+audience: Entrepreneurs, retail chains, real-estate agents, investors
+
+audit:
+  side_m: 1000
+  zoom: 18
+  ask_side_m: 1000
+
+classes:
+  building: {prompts: [rooftop], color: "#00E5FF", min_area_m2: 6, max_area_m2: 20000}
+
+layers: [osm_pois, buildings_baseline, osm_roads]
+
+analyzer: business_site
+params:
+  catchment_m: 500            # walking distance customers come from
+  people_per_building: 4      # rough assumption to turn rooftops into people
+  competitor_tags: []         # OSM tags for the same kind of business, e.g. [amenity=pharmacy] (the chat fills this)
+  anchors:                    # places that bring people past the door
+    schools:   [amenity=school, amenity=college, amenity=university, amenity=kindergarten]
+    health:    [amenity=hospital, amenity=clinic, amenity=doctors]
+    transport: [highway=bus_stop, amenity=bus_station, public_transport=*]
+    shopping:  [amenity=marketplace, shop=mall, shop=supermarket]
+    worship:   [amenity=place_of_worship]
+    offices:   [office=*]
+  people_per_competitor: {strong: 3000, crowded: 800}
+  major_roads: [motorway, trunk, primary, secondary, tertiary]
+
+memo:
+  framing: >-
+    For someone deciding where to open a business. Be concrete about competitors,
+    customers and access; say what TerraSat cannot see (rents, foot traffic,
+    licences) and suggest checking them.
+  sections: [Verdict, Competitors, Customers nearby, Anchors and access, What to check on the ground]
+  languages: [en, sw]
+
+reports:
+  types:
+    business_closed: [Business closed or empty shop, Biashara imefungwa au duka tupu]
+    new_business:    [New business opened, Biashara mpya imefunguliwa]
+
+questions:
+  - id: foot_traffic
+    en: How busy is this street with people walking by?
+    sw: Mtaa huu una watu wengi wanaopita kwa miguu?
+    options:
+      quiet:    [Quiet, Kimya]
+      moderate: [Moderate, Wastani]
+      busy:     [Busy, Wengi sana]

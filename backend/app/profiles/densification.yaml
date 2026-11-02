@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Audit profile: Densification & Building Potential
+# How built-up is an area, what has been built recently, and is there room to
+# build more? For developers, real-estate firms and county planners.
+# ---------------------------------------------------------------------------
+id: densification
+name: Densification & Building Potential
+tagline: How built-up is this area, what is new, and is there room to build more?
+status: beta
+audience: Developers, real-estate firms, county planners
+
+audit:
+  side_m: 600
+  zoom: 18
+  ask_side_m: 500
+
+classes:
+  building: {prompts: [building], color: "#00E5FF", min_area_m2: 6, max_area_m2: 20000}
+
+layers: [buildings_baseline, osm_roads]
+
+analyzer: densification
+params:
+  coverage_bands: {low: 25, high: 50}   # % of land under roofs: below low = room to build, above high = dense
+  dense_buildings_per_ha: 80            # also dense: many small roofs (informal settlements), whatever the coverage
+  major_roads: [motorway, trunk, primary, secondary, tertiary]
+  metres_per_floor: 3                   # to turn a building height into floors
+
+memo:
+  framing: >-
+    For developers and planners weighing where to build. Report density, recent
+    construction and access as facts, and point to Nairobi's zoning rules for the
+    allowed ground coverage and plot ratio rather than guessing them.
+  sections: [Summary, How built-up it is, What is new, Access, Room to build]
+  languages: [en, sw]
+
+reports:
+  types:
+    construction: [Building work happening, Ujenzi unaendelea]
+    vacant_plot:  [Empty plot, Kiwanja kitupu]
+
+questions:
+  - id: building_work
+    en: Is there new building work on this street?
+    sw: Je, kuna ujenzi mpya katika mtaa huu?
+    options:
+      none: [None, Hakuna]
+      some: [One or two sites, Sehemu moja au mbili]
+      lots: [Lots, Nyingi]

@@ -5,21 +5,22 @@
 # eligibility zone, 1 km WISP / community Wi-Fi sector.
 # ---------------------------------------------------------------------------
 id: solar_minigrid
-name: Solar & Mini-grid Planning
-tagline: How many homes are unserved, how close is the grid, and what does it cost per household?
+name: Solar Viability
+tagline: Does solar make sense here? Roof space, sunshine, expected output and payback, plus grid and mini-grid context.
 status: beta
-audience: Utility planners, mini-grid developers, WISPs, county energy offices
+audience: Property owners, developers, businesses, solar installers, mini-grid developers
 
 audit:
   side_m: 2100
   zoom: 18
+  ask_side_m: 600
 
 classes:
   building:    {prompts: [rooftop], color: "#00E5FF", min_area_m2: 6, max_area_m2: 5000}
   solar_panel: {prompts: [solar panel], color: "#00E676", min_area_m2: 0.5, max_area_m2: 2000}
   water_tank:  {prompts: [water tank], color: "#FFC400", min_area_m2: 0.5, max_area_m2: 100}
 
-layers: [osm_power_lines]
+layers: [osm_power_lines, nasa_power]
 
 analyzer: solar_minigrid
 params:
@@ -28,10 +29,36 @@ params:
   capex_usd: {minigrid_15kw: 25000, wisp_mast: 3500}
   grid_near_m: 600          # LV/MV line within this distance of the pin = grid extension candidate
   dense_min_buildings: 100  # buildings inside 600 m to count as "dense"
+  # Rooftop solar for the building at the pin and for the area. Costs and tariff are
+  # assumptions to show the method; the chat checks current KPLC tariffs on the web.
+  rooftop:
+    usable_roof_share: 0.6    # part of a roof that can take panels
+    m2_per_kwp: 6             # roof area per kW of panels
+    performance_ratio: 0.75   # losses: heat, dust, inverter, wiring
+    cost_usd_per_kwp: 800
+    tariff_usd_per_kwh: 0.20
+    good_sun_kwh_m2_day: 4.5  # above this, sunshine is good for solar
 
 memo:
   framing: >-
-    Decision support for electrification and connectivity: grid extension vs
-    mini-grid vs standalone solar, with cost per unserved household.
-  sections: [Site summary, Grid proximity, Unit economics, Recommendation]
-  languages: [en]
+    For a property owner, developer or business asking whether solar is worth it:
+    roof space, sunshine, expected output and payback (marking cost and tariff as
+    assumptions), how many neighbours already have panels, and grid context.
+  sections: [Verdict, Roof and sunshine, Output and payback, Grid context]
+  languages: [en, sw]
+
+reports:
+  types:
+    power_outage:  [Power outage, Umeme umekatika]
+    low_voltage:   [Weak or unstable power, Umeme hafifu au usio thabiti]
+    no_connection: [No electricity connection, Hakuna muunganisho wa umeme]
+
+questions:
+  - id: power_outages
+    en: How often does the power go off here in a normal week?
+    sw: Umeme hukatika mara ngapi hapa katika wiki ya kawaida?
+    options:
+      rarely: [Rarely, Mara chache]
+      few:    [1 to 3 times, Mara 1 hadi 3]
+      often:  [Most days, Siku nyingi]
+      none:   [No electricity here, Hakuna umeme hapa]
