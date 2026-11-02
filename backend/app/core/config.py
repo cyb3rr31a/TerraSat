@@ -18,12 +18,13 @@ class Settings(BaseSettings):
     meta_api_key: str = ""
     meta_api_base_url: str = ""
     mapbox_token: str = ""
+    google_maps_api_key: str = ""         # optional: Google Places for business competitors
     tile_provider: str = "mapbox_static"   # mapbox_static | mapbox | esri
 
     # Analysis defaults (all overridable per request)
     tile_zoom: int = 18
     audit_box_m: int = 2100          # side of square analysed around the pin
-    riparian_buffer_m: float = 30.0  # configurable; verify legal source (6-30 m range)
+    riparian_buffer_m: float = 30.0  # EMCA (Water Quality) Regs 2006: 6-30 m; 30 m enforced on Nairobi Rivers
     utm_epsg: int = 32737            # UTM 37S, metric CRS for Nairobi
 
     data_dir: Path = ROOT / "data"
