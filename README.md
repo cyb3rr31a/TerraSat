@@ -143,6 +143,7 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 |---|---|
 | `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap), building footprints (Overture Maps) and elevation (Copernicus GLO-30) to `data/raw/`, and cuts the UNOSAT 2024 flood mapping to each site (download `FL20240426KEN_SHP.zip` from HDX into `data/raw/flood_2024/` first); skips what you already have |
 | `python scripts/fetch_data.py pois` | Shops, services, schools, clinics, markets and bus stops in Nairobi (OpenStreetMap), for the business-site analysis |
+| `python scripts/fetch_data.py places` | Suburb and neighbourhood names, for place search in the web app |
 | `python scripts/fetch_data.py flood_history` | Past Nairobi floods (2024, March 2026, Interior Ministry at-risk list) found by Muse Spark web search and mapped with Nominatim |
 | `python scripts/run_audit.py --profile flood --preset mathare` | Runs a full audit; results in `data/outputs/<profile>_<place>/` |
 | `python scripts/run_audit.py --profile solar_minigrid --preset syokimau` | Same engine, solar & mini-grid profile |
@@ -174,6 +175,7 @@ Start it with `uvicorn backend.app.main:app --reload`; interactive docs at http:
 | `POST /check` | Everything TerraSat knows about one spot: flood risk class, riparian reserve, 2024 flood, past floods, reports and neighbours' answers nearby |
 | `POST /ask` | Ask anything about a place: Muse Spark picks the analysis (business site, solar, densification, flood) and the place, TerraSat runs it there and answers with a verdict, highlights and the picture; people on site get a quick question |
 | `POST /observations` | Save a tap-to-answer reply; returns the next question |
+| `GET /places?q=` | Place suggestions while typing (suburbs and landmarks, from local OpenStreetMap data) |
 | `GET /report-types` | What people can report (from the audit profiles) |
 
 Report statuses: `corroborated` / `unconfirmed` -> `assigned` -> `cleared` (or `dismissed`). Data is stored in `data/terrasat.db` (SQLite) and `data/media/`.
@@ -196,9 +198,10 @@ backend/app/
   services/meta.py        Muse Voice transcription and Muse Spark calls
   services/reports.py     reports and quick-question answers (SQLite)
   services/assistant.py   the Ask engine: routing, quick audits, place check, answers
-web/                      React + Leaflet web app: src/App.tsx (chat, map, picture, cards, memo), src/api.ts
+web/                      React + Leaflet web app: src/App.tsx (map, panel, place search, ask), src/Report.tsx
+                          (site report card, before/after slider, progress, memo), src/api.ts
 mobile/                   Expo app: App.tsx (role picker, settings), src/Resident.tsx (voice reports,
-                          offline queue, my reports), src/Chat.tsx (Ask),
+                          offline queue, my reports, status timeline), src/Chat.tsx (Ask with report cards),
                           src/api.ts (API client + queue), src/ui.tsx (components, EN/SW text)
 scripts/                  fetch_data.py, run_audit.py, check.py
 tests/                    pytest suite
