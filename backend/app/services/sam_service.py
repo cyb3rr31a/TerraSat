@@ -409,3 +409,55 @@ def render_overlay(mosaic: Mosaic, dets: Sequence[Detection],
             pts = list(part.exterior.coords)
             draw.polygon(pts, fill=rgb + (alpha,), outline=rgb + (255,))
     return Image.alpha_composite(base, layer)
+
+
+# Colours for analysis results drawn on the picture (any profile)
+RISK_COLORS = {"high": "#FF1744", "medium": "#FF9100", "low": "#00E5FF"}
+POINT_STYLES = {"competitor": ("#FF1744", 9), "anchor": ("#2979FF", 6), "choke_point": ("#FF9100", 8)}
+OUTLINES = {"catchment": "#FFFFFF", "ring": "#FFFFFF", "riparian_zone": "#FFEA00"}
+
+
+def _feature_color(props: dict) -> Optional[str]:
+    """Buildings: flood risk, else new construction, else solar, else default cyan."""
+    if props.get("class") != "building":
+        return {"solar_panel": "#00E676", "water_tank": "#FFC400", "garbage": "#FF3D00"}.get(props.get("class"))
+    if props.get("risk"):
+        return RISK_COLORS.get(props["risk"], "#00E5FF")
+    if props.get("new_since_baseline"):
+        return "#E040FB"
+    if props.get("has_solar"):
+        return "#00E676"
+    return "#00E5FF"
+
+
+def render_analysis(mosaic: Mosaic, features: Sequence[dict], alpha: int = 110) -> Image.Image:
+    """The satellite picture with the audit's results drawn on it: buildings coloured by what the
+    profile found (flood risk, new since baseline, panels), zones as outlines, places as dots."""
+    base = mosaic.image.convert("RGBA")
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    rgb = lambda h: tuple(int(h.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    to_px = lambda g: geo.lonlat_polygon_to_pixel(g, mosaic.box.x0, mosaic.box.y0, mosaic.zoom)
+    w = max(2, base.size[0] // 500)
+    for f in features:
+        props, g = f.get("properties", {}), shape(f["geometry"])
+        cls = props.get("class")
+        if cls in OUTLINES:
+            for part in getattr(to_px(g), "geoms", [to_px(g)]):
+                draw.line(list(part.exterior.coords), fill=rgb(OUTLINES[cls]) + (230,), width=w)
+        elif cls in POINT_STYLES and g.geom_type == "Point":
+            color, r = POINT_STYLES[cls]
+            x, y = to_px(g).coords[0]
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=rgb(color) + (255,), outline=(255, 255, 255, 255), width=2)
+        elif cls == "waterway" and g.geom_type in ("LineString", "MultiLineString"):
+            for part in getattr(to_px(g), "geoms", [to_px(g)]):
+                draw.line(list(part.coords), fill=(41, 121, 255, 255), width=w + 1)
+        elif g.geom_type in ("Polygon", "MultiPolygon"):
+            color = _feature_color(props)
+            if color:
+                for part in getattr(to_px(g), "geoms", [to_px(g)]):
+                    draw.polygon(list(part.exterior.coords), fill=rgb(color) + (alpha,), outline=rgb(color) + (255,))
+    # the pin at the centre
+    cx, cy = base.size[0] / 2, base.size[1] / 2
+    draw.ellipse([cx - 10, cy - 10, cx + 10, cy + 10], outline=(255, 255, 255, 255), width=4)
+    return Image.alpha_composite(base, layer)
