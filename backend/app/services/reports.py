@@ -1,9 +1,9 @@
-"""Citizen reports and crew tasks, stored in SQLite.
+"""Ground truth from people, stored in SQLite: reports and answers to quick questions.
 
-A resident's voice note becomes a report:
-    any audio -> WAV -> transcript (Muse Voice) -> issue/place/urgency (Muse Spark)
-    -> corroborated against TerraSat's layers (river distance, height, 2024 floods).
-Officers assign reports to crews as tasks; crews mark them cleared.
+A voice note becomes a report:
+    any audio -> WAV -> transcript (Muse Voice) -> type/place/urgency (Muse Spark)
+    -> corroborated against the profile's layers (for flood: river distance, height, 2024 floods).
+Report types and questions come from the audit profiles, so every use case can collect its own.
 """
 from __future__ import annotations
 
@@ -18,13 +18,20 @@ from shapely.geometry import Point, shape
 from shapely.ops import nearest_points, unary_union
 
 from backend.app.core.config import settings
+from backend.app.profiles.loader import list_profiles
 from backend.app.services import audio, geo, meta
 from backend.app.services.analyzers import flood_2024_checker
 from backend.app.services.layers import load_dem, load_layer
 
-ISSUE_TYPES = ["blocked_drain", "flooding", "river_overflow", "garbage", "collapsed_bridge", "other"]
-REPORT_STATUSES = ["received", "corroborated", "unconfirmed", "assigned", "cleared", "dismissed"]
-TASK_STATUSES = ["assigned", "en_route", "cleared"]
+# Report types that belong to no single use case; the rest come from the profiles' `reports.types`.
+GENERAL_TYPES = {"water_supply": ["Water supply problem", "Tatizo la maji ya bomba"],
+                 "sewer_overflow": ["Sewage overflow", "Majitaka yanafurika"],
+                 "road_damage": ["Damaged road", "Barabara mbovu"],
+                 "streetlight": ["Streetlight not working", "Taa ya barabarani haifanyi kazi"],
+                 "other": ["Other", "Nyingine"]}
+REPORT_STATUSES = ["received", "corroborated", "unconfirmed", "resolved", "dismissed"]
+# received = no layer check for this type; corroborated / unconfirmed = checked against the map layers;
+# resolved = fixed on the ground (e.g. the drain was cleared)
 # Names transcription often garbles (e.g. "Athare", "madharek" for Mathare) - Muse Spark maps them back.
 NAIROBI_PLACES = ["Mathare", "Mukuru Kwa Reuben", "Mukuru Kwa Njenga", "Kibera", "Korogocho", "Lucky Summer",
                   "Kariobangi", "Dandora", "Kayole", "Komarock", "Njiru", "Ruai", "Mwiki", "Kiambiu", "Donholm",
@@ -41,13 +48,10 @@ CREATE TABLE IF NOT EXISTS reports (
   id INTEGER PRIMARY KEY, client_id TEXT UNIQUE, device_id TEXT, created_at TEXT,
   lat REAL, lon REAL, accuracy_m REAL, audio_path TEXT, photo_path TEXT,
   transcript TEXT, issue_type TEXT, place TEXT, urgency TEXT, summary_en TEXT, summary_sw TEXT,
-  context TEXT, status TEXT, notes TEXT, location_source TEXT);
-CREATE TABLE IF NOT EXISTS crews (id INTEGER PRIMARY KEY, name TEXT, phone TEXT);
-CREATE TABLE IF NOT EXISTS tasks (
-  id INTEGER PRIMARY KEY, report_id INTEGER REFERENCES reports(id), crew_id INTEGER REFERENCES crews(id),
-  status TEXT, notes TEXT, after_photo_path TEXT, created_at TEXT, updated_at TEXT);
+  context TEXT, status TEXT, notes TEXT, location_source TEXT, profile TEXT);
+CREATE TABLE IF NOT EXISTS observations (
+  id INTEGER PRIMARY KEY, created_at TEXT, device_id TEXT, lat REAL, lon REAL, question_id TEXT, answer TEXT);
 """
-DEMO_CREWS = [("Crew A - Mathare", ""), ("Crew B - Mukuru", ""), ("Crew C - Korogocho", "")]
 
 
 def now() -> str:
@@ -60,10 +64,10 @@ def connect(path: Optional[Path] = None) -> sqlite3.Connection:
     db = sqlite3.connect(path, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
-    if "location_source" not in [r["name"] for r in db.execute("PRAGMA table_info(reports)")]:
-        db.execute("ALTER TABLE reports ADD COLUMN location_source TEXT")
-    if not db.execute("SELECT 1 FROM crews LIMIT 1").fetchone():
-        db.executemany("INSERT INTO crews (name, phone) VALUES (?, ?)", DEMO_CREWS)
+    have = [r["name"] for r in db.execute("PRAGMA table_info(reports)")]
+    for col in ("location_source", "profile"):  # columns added after the first demo databases
+        if col not in have:
+            db.execute(f"ALTER TABLE reports ADD COLUMN {col} TEXT")
     db.commit()
     return db
 
@@ -76,19 +80,32 @@ def save_media(data: bytes, suffix: str) -> str:
     return name  # served at /media/<name>
 
 
+def report_types() -> dict[str, dict]:
+    """Every report type: {"en", "sw", "profile"} (profile None for general types)."""
+    out = {k: {"en": en, "sw": sw, "profile": p.id} for p in list_profiles() for k, (en, sw) in p.reports.types.items()}
+    return {**out, **{k: {"en": en, "sw": sw, "profile": None} for k, (en, sw) in GENERAL_TYPES.items()}}
+
+
+def questions() -> dict[str, dict]:
+    """Every quick question by id, with the profile it belongs to."""
+    return {q.id: {**q.model_dump(), "profile": p.id} for p in list_profiles() for q in p.questions}
+
+
 def parse_report(transcript: str) -> dict:
     """Muse Spark turns a free-form EN/SW/Sheng transcript into structured fields."""
+    types = report_types()
     prompt = (
-        "A Nairobi resident sent this flood or drainage report as a voice note (English, Swahili or Sheng):\n"
+        "A Nairobi resident sent this report about their area as a voice note (English, Swahili or Sheng):\n"
         f'"{transcript}"\n\n'
-        f"Return JSON with: issue_type (one of {ISSUE_TYPES}), place (the neighbourhood or landmark; "
+        f"Return JSON with: issue_type (the best fit from {list(types)}), place (the neighbourhood or landmark; "
         f"transcription often garbles names, so match to one of {NAIROBI_PLACES} when it sounds similar, "
         "plus any landmark such as 'near the bridge'), urgency (low, medium or high), "
         "summary_en (one sentence in English), summary_sw (one sentence in Swahili).")
     out = meta.spark_json(prompt)
-    if out.get("issue_type") not in ISSUE_TYPES:
+    if out.get("issue_type") not in types:
         out["issue_type"] = "other"
-    return {k: out.get(k) for k in ("issue_type", "place", "urgency", "summary_en", "summary_sw")}
+    out["profile"] = types[out["issue_type"]]["profile"]
+    return {k: out.get(k) for k in ("issue_type", "profile", "place", "urgency", "summary_en", "summary_sw")}
 
 
 def corroborate(lon: float, lat: float, near_m: float = 100) -> dict:
@@ -136,16 +153,22 @@ def create_report(db, audio_bytes: bytes, audio_suffix: str, lat: Optional[float
         match = next((c for name, c in PLACE_CENTRES.items() if name in place), None)
         if match:
             (lon, lat), location_source = match, "place_name"
-    ctx = corroborate(lon, lat) if lat is not None and lon is not None else {"corroborated": False}
+    # only types whose profile has layers to check against (flood) get corroborated
+    check = bool(fields.get("profile")) and next(p for p in list_profiles() if p.id == fields["profile"]).reports.corroborate
+    if not check:
+        ctx, status = {}, "received"
+    else:
+        ctx = corroborate(lon, lat) if lat is not None and lon is not None else {"corroborated": False}
+        status = "corroborated" if ctx.get("corroborated") else "unconfirmed"
     cur = db.execute(
         "INSERT INTO reports (client_id, device_id, created_at, lat, lon, accuracy_m, audio_path, photo_path,"
-        " transcript, issue_type, place, urgency, summary_en, summary_sw, context, status, location_source)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " transcript, issue_type, place, urgency, summary_en, summary_sw, context, status, location_source, profile)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (client_id or uuid.uuid4().hex, device_id, now(), lat, lon, accuracy_m,
          save_media(audio_bytes, audio_suffix or ".m4a"), save_media(photo, photo_suffix) if photo else None,
          transcript, fields.get("issue_type"), fields.get("place"), fields.get("urgency"),
-         fields.get("summary_en"), fields.get("summary_sw"), json.dumps(ctx),
-         "corroborated" if ctx.get("corroborated") else "unconfirmed", location_source))
+         fields.get("summary_en"), fields.get("summary_sw"), json.dumps(ctx), status, location_source,
+         fields.get("profile")))
     db.commit()
     return get_report(db, cur.lastrowid)
 
@@ -157,19 +180,22 @@ def _row(row) -> dict:
     return d
 
 
+REPORTS_SQL = "SELECT r.* FROM reports r"
+
+
 def get_report(db, report_id: int) -> Optional[dict]:
-    row = db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    row = db.execute(REPORTS_SQL + " WHERE r.id = ?", (report_id,)).fetchone()
     return _row(row) if row else None
 
 
 def list_reports(db, status: Optional[str] = None, device_id: Optional[str] = None,
                  since: Optional[str] = None) -> list[dict]:
-    sql, args = "SELECT * FROM reports WHERE 1=1", []
+    sql, args = REPORTS_SQL + " WHERE 1=1", []
     for col, val, op in (("status", status, "="), ("device_id", device_id, "="), ("created_at", since, ">")):
         if val:
-            sql += f" AND {col} {op} ?"
+            sql += f" AND r.{col} {op} ?"
             args.append(val)
-    return [_row(r) for r in db.execute(sql + " ORDER BY id DESC", args)]
+    return [_row(r) for r in db.execute(sql + " ORDER BY r.id DESC", args)]
 
 
 def update_report(db, report_id: int, status: Optional[str] = None, notes: Optional[str] = None) -> Optional[dict]:
@@ -181,45 +207,22 @@ def update_report(db, report_id: int, status: Optional[str] = None, notes: Optio
     return get_report(db, report_id)
 
 
-def list_crews(db) -> list[dict]:
-    return [dict(r) for r in db.execute("SELECT * FROM crews ORDER BY id")]
-
-
-def create_task(db, report_id: int, crew_id: int, notes: str = "") -> dict:
-    if not get_report(db, report_id):
-        raise LookupError(f"report {report_id} not found")
-    cur = db.execute("INSERT INTO tasks (report_id, crew_id, status, notes, created_at, updated_at)"
-                     " VALUES (?, ?, 'assigned', ?, ?, ?)", (report_id, crew_id, notes, now(), now()))
-    db.execute("UPDATE reports SET status = 'assigned' WHERE id = ?", (report_id,))
+def save_observation(db, device_id: str, lat: float, lon: float, question_id: str, answer: str) -> dict:
+    """A tap-to-answer reply from someone at a place (e.g. "this street flooded knee deep")."""
+    q = questions().get(question_id)
+    if not q or answer not in q["options"]:
+        raise ValueError(f"unknown question or answer: {question_id}={answer}")
+    if not (KENYA[1] <= lat <= KENYA[3] and KENYA[0] <= lon <= KENYA[2]):
+        raise ValueError("lat/lon is outside Kenya")
+    cur = db.execute("INSERT INTO observations (created_at, device_id, lat, lon, question_id, answer)"
+                     " VALUES (?,?,?,?,?,?)", (now(), device_id, lat, lon, question_id, answer))
     db.commit()
-    return get_task(db, cur.lastrowid)
+    return dict(db.execute("SELECT * FROM observations WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
-def get_task(db, task_id: int) -> Optional[dict]:
-    row = db.execute("SELECT t.*, r.lat, r.lon, r.place, r.issue_type, r.summary_en, r.summary_sw, c.name AS crew"
-                     " FROM tasks t JOIN reports r ON r.id = t.report_id JOIN crews c ON c.id = t.crew_id"
-                     " WHERE t.id = ?", (task_id,)).fetchone()
-    return dict(row) if row else None
-
-
-def list_tasks(db, crew_id: Optional[int] = None) -> list[dict]:
-    ids = db.execute("SELECT id FROM tasks" + (" WHERE crew_id = ?" if crew_id else "") + " ORDER BY id DESC",
-                     (crew_id,) if crew_id else ()).fetchall()
-    return [get_task(db, r["id"]) for r in ids]
-
-
-def update_task(db, task_id: int, status: str, notes: Optional[str] = None,
-                after_photo: Optional[bytes] = None, photo_suffix: str = ".jpg") -> Optional[dict]:
-    if status not in TASK_STATUSES:
-        raise ValueError(f"status must be one of {TASK_STATUSES}")
-    task = get_task(db, task_id)
-    if not task:
-        return None
-    photo = save_media(after_photo, photo_suffix) if after_photo else None
-    db.execute("UPDATE tasks SET status = ?, notes = COALESCE(?, notes),"
-               " after_photo_path = COALESCE(?, after_photo_path), updated_at = ? WHERE id = ?",
-               (status, notes, photo, now(), task_id))
-    if status == "cleared":  # closes the loop: the resident sees their report cleared
-        db.execute("UPDATE reports SET status = 'cleared' WHERE id = ?", (task["report_id"],))
-    db.commit()
-    return get_task(db, task_id)
+def observations_near(db, lon: float, lat: float, radius_m: float = 150) -> list[dict]:
+    d = radius_m / 111_000  # rough box first, exact distance after
+    rows = db.execute("SELECT * FROM observations WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+                      (lat - d, lat + d, lon - d, lon + d)).fetchall()
+    here = geo.to_utm(Point(lon, lat))
+    return [dict(r) for r in rows if geo.to_utm(Point(r["lon"], r["lat"])).distance(here) <= radius_m]
