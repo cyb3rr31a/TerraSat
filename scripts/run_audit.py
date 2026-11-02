@@ -4,7 +4,7 @@
     python scripts/run_audit.py --profile solar_minigrid --lon 36.98 --lat -1.42
     python scripts/run_audit.py --profile flood --preset mathare --offline   # no network
 
-Outputs: data/outputs/<profile>_<place>/ mosaic.jpg, overlay.png, audit.geojson, summary.json
+Outputs: data/outputs/<profile>_<place>/ mosaic.jpg, overlay.jpg, audit.geojson, summary.json
 """
 import argparse
 import io

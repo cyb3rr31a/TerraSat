@@ -6,6 +6,8 @@ layers are skipped (use --force to refresh).
 
 Layers:
   waterways, roads, power_lines  OpenStreetMap via the Overpass API
+  pois                           Shops, services, schools, clinics, markets and bus stops (OpenStreetMap),
+                                 for the business-site profile
   buildings                      Overture Maps footprints around each demo site
   terrain                        Copernicus GLO-30 elevation tile(s) covering the demo sites
   flood_2024                     UNOSAT 2024 flood mapping, cut to each demo site. Download
@@ -17,10 +19,8 @@ Layers:
 """
 import argparse
 import json
-import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import httpx
@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from backend.app.services.audit import PRESETS  # noqa: E402
+from backend.app.services.assistant import geocode  # noqa: E402
 from backend.app.services.layers import layer_path  # noqa: E402
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",          # main server
@@ -49,7 +50,8 @@ OSM_LAYERS = {
                     ['way["power"~"^(line|minor_line|cable)$"]'],
                     ["power", "voltage", "name", "operator"]),
 }
-ALL = [*OSM_LAYERS, "buildings", "terrain", "flood_2024", "flood_history"]
+POI_TAGS = ["name", "amenity", "shop", "office", "healthcare", "public_transport", "highway", "leisure", "tourism"]
+ALL = [*OSM_LAYERS, "pois", "buildings", "terrain", "flood_2024", "flood_history"]
 FLOOD_SITES = ("mathare", "mukuru", "kibera", "korogocho", "east_cluster")
 SITE_HALF_DEG = 0.0105  # ~1.2 km each way: covers the 2.1 km audit square
 
@@ -96,6 +98,39 @@ def fetch_osm(name, force=False):
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps(gj))
     print(f"{name}: {len(gj['features'])} features")
+
+
+def fetch_pois(force=False):
+    """Every shop, service and public facility in Nairobi as points (ways as their centre)."""
+    dst = layer_path("osm_pois")
+    if dst.exists() and not force:
+        return print("pois: already downloaded")
+    s, w, n, e = NAIROBI_BBOX
+    query = (f"[out:json][timeout:240];\n(\n  nwr[shop]({s},{w},{n},{e});\n  nwr[amenity]({s},{w},{n},{e});\n"
+             f"  nwr[office]({s},{w},{n},{e});\n  node[highway=bus_stop]({s},{w},{n},{e});\n"
+             f"  node[public_transport]({s},{w},{n},{e});\n);\nout center tags;")
+    with httpx.Client(timeout=300, headers={"User-Agent": "TerraSat/0.4 (hackathon)"}) as c:
+        for url in OVERPASS_URLS:
+            try:
+                r = c.post(url, data={"data": query})
+                r.raise_for_status()
+                elements = r.json()["elements"]
+                break
+            except (httpx.HTTPError, ValueError) as err:
+                print(f"  {url} failed ({err.__class__.__name__}), trying the next server...")
+        else:
+            raise RuntimeError("pois: all Overpass servers are busy - try again later")
+    feats = []
+    for el in elements:
+        lat, lon = el.get("lat") or el.get("center", {}).get("lat"), el.get("lon") or el.get("center", {}).get("lon")
+        if lat is None or lon is None:
+            continue
+        tags = el.get("tags", {})
+        feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                      "properties": {"osm_id": f"{el['type']}/{el['id']}", **{k: tags[k] for k in POI_TAGS if k in tags}}})
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps({"type": "FeatureCollection", "features": feats}), encoding="utf-8")
+    print(f"pois: {len(feats)} places")
 
 
 def site_bbox(site):
@@ -199,44 +234,6 @@ def _same_url(a, b):
     return norm(a) == norm(b)
 
 
-# Short names news uses that match a different place first on the map
-ALIASES = {"kwa njenga": "Mukuru Kwa Njenga", "kwa reuben": "Mukuru Kwa Reuben", "kwa rueben": "Mukuru Kwa Reuben"}
-
-
-def name_variants(place):
-    """Search terms for a place as news writes it, most specific first:
-    "Mombasa Road at Cabanas" -> itself, "Cabanas", "Mombasa Road"; "Jomo Kenyatta ... (JKIA)" -> also "JKIA"."""
-    place = ALIASES.get(place.strip().lower(), place)
-    inner = re.findall(r"\(([^)]+)\)", place)
-    base = re.sub(r"\([^)]*\)", "", place)
-    parts = re.split(r",| in | at | along | near | and |/", base)
-    clean = lambda t: re.sub(r"\b(informal settlement|slum|ward|junction)\b", "", t, flags=re.I).strip(" -")
-    is_road = lambda t: bool(re.search(r"\b(road|highway|superhighway|avenue|bypass|street|way)\b", t, re.I))
-    out = []
-    for t in [place, base, *sorted(parts, key=is_road), *inner]:  # a landmark beats a long road
-        t = clean(t)
-        if len(t) > 2 and t.lower() not in (o.lower() for o in out):
-            out.append(t)
-    return out[:5]
-
-
-def geocode(client, place):
-    """Nominatim, limited to Nairobi (usage policy: 1 request a second, identify the app).
-    Prefers named places (suburbs, estates) over roads or shops that share the name."""
-    w, s, e, n = NAIROBI_BBOX[1], NAIROBI_BBOX[0], NAIROBI_BBOX[3], NAIROBI_BBOX[2]
-    for name in name_variants(place):
-        time.sleep(1.1)
-        r = client.get("https://nominatim.openstreetmap.org/search",
-                       params={"q": f"{name}, Nairobi, Kenya", "format": "jsonv2", "limit": 5,
-                               "viewbox": f"{w},{n},{e},{s}", "bounded": 1})
-        r.raise_for_status()
-        hits = r.json()
-        if hits:
-            best = next((h for h in hits if h.get("category") == "place"), hits[0])
-            return float(best["lon"]), float(best["lat"]), best["display_name"]
-    return None
-
-
 def fetch_flood_history(force=False):
     """News and official records of past floods, as map points. Evidence only (memos, report
     context): coverage favours places reporters reach, so it isn't used in the risk score."""
@@ -264,7 +261,7 @@ def fetch_flood_history(force=False):
         for row in rows:
             key = (row["place"] or "").strip().lower()
             if key and key not in cache:
-                cache[key] = geocode(c, row["place"])
+                cache[key] = geocode(row["place"], c)
             hit = cache.get(key)
             if not hit:
                 missed.append(row["place"])
@@ -295,6 +292,8 @@ def main():
                 cut_flood_2024(a.force)
             elif name == "flood_history":
                 fetch_flood_history(a.force)
+            elif name == "pois":
+                fetch_pois(a.force)
             else:
                 fetch_osm(name, a.force)
         except (RuntimeError, ValueError, httpx.HTTPError) as e:
