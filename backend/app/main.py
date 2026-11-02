@@ -189,6 +189,12 @@ def patch_report(report_id: int, body: ReportUpdate) -> dict:
     return out
 
 
+@app.get("/places")
+def places(q: str) -> list[dict]:
+    """Place suggestions while typing (suburbs and landmarks in Nairobi)."""
+    return assistant.search_places(q)
+
+
 @app.get("/report-types")
 def report_types() -> dict:
     """What people can report: {type: {en, sw, profile}}. Comes from the audit profiles."""
