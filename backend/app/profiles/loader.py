@@ -21,12 +21,30 @@ class ClassSpec(BaseModel):
 class AuditDefaults(BaseModel):
     side_m: float = 2100
     zoom: int = 18
+    ask_side_m: float = 600   # smaller square for questions in the Ask chat: fast and cheap
 
 
 class MemoSpec(BaseModel):
     framing: str = ""
     sections: list[str] = []
     languages: list[str] = ["en"]
+
+
+Labels = tuple[str, str]               # [English, Kiswahili]
+
+
+class ReportSpec(BaseModel):
+    """What residents can report for this use case. Voice notes are sorted into these types."""
+    types: dict[str, Labels] = {}
+    corroborate: bool = False          # check reports against the profile's map layers
+
+
+class QuestionSpec(BaseModel):
+    """A quick tap-to-answer question the chat asks people on the spot (ground truth)."""
+    id: str
+    en: str
+    sw: str
+    options: dict[str, Labels]
 
 
 class Profile(BaseModel):
@@ -41,6 +59,8 @@ class Profile(BaseModel):
     analyzer: str
     params: dict = {}
     memo: MemoSpec = MemoSpec()
+    reports: ReportSpec = ReportSpec()
+    questions: list[QuestionSpec] = []
 
     def sam_classes(self) -> dict[str, dict]:
         """Class config in the plain-dict shape sam_service expects."""
