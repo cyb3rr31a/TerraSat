@@ -4,7 +4,6 @@ app/profiles; the mobile app and the dashboard both call these endpoints.
 Interactive docs: http://127.0.0.1:8000/docs
 """
 import csv
-import hashlib
 import io
 import json
 import re
@@ -19,12 +18,13 @@ from pydantic import BaseModel
 
 from backend.app.core.config import settings
 from backend.app.profiles.loader import list_profiles, load_profile
-from backend.app.services import reports
-from backend.app.services.audit import PRESETS, ranked_choke_points, run_audit, save_audit, write_memo
+from backend.app.services import assistant, reports
+from backend.app.services.audit import PRESETS, cached_audit, ranked_choke_points, write_memo
 
-app = FastAPI(title="TerraSat", version="0.3.0",
-              description="Geospatial auditing engine: satellite imagery + SAM 3.1 + spatial rules + "
-                          "Muse Spark, configured by audit profiles. Case study: Nairobi flood exposure.")
+app = FastAPI(title="TerraSat", version="0.4.0",
+              description="Urban planning assistant on a geospatial auditing engine: satellite imagery + SAM 3.1 + "
+                          "spatial rules + Muse Spark, configured by audit profiles, plus ground truth from people "
+                          "(reports, quick questions, chat). Case study: Nairobi flood risk.")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DATA = Path(settings.data_dir)
@@ -113,23 +113,11 @@ def audit(req: AuditRequest) -> dict:
     else:
         raise HTTPException(400, "Give a preset, or lon and lat")
     try:
-        load_profile(req.profile)
+        return cached_audit(req.profile, lon, lat, req.params, refresh=req.refresh)
     except KeyError as e:
         raise HTTPException(400, str(e))
-    key = json.dumps([req.profile, round(lon, 5), round(lat, 5), req.params], sort_keys=True)
-    audit_id = hashlib.sha1(key.encode()).hexdigest()[:12]
-    folder = DATA / "outputs" / "api" / audit_id
-    if (folder / "summary.json").exists() and not req.refresh:
-        info = json.loads((folder / "summary.json").read_text())
-    else:
-        try:
-            info = save_audit(run_audit(req.profile, lon, lat, params=req.params), folder)
-        except Exception as e:  # noqa: BLE001
-            fail(e)
-    base = f"/outputs/api/{audit_id}"
-    return {"audit_id": audit_id, "center": {"lon": lon, "lat": lat}, **info,
-            "files": {"geojson": f"{base}/audit.geojson", "overlay": f"{base}/overlay.png",
-                      "mosaic": f"{base}/mosaic.jpg"}}
+    except Exception as e:  # noqa: BLE001
+        fail(e)
 
 
 @app.get("/audit/{audit_id}/choke-points")
@@ -201,40 +189,71 @@ def patch_report(report_id: int, body: ReportUpdate) -> dict:
     return out
 
 
-# ------------------------------------------------------------ crew tasks
-@app.get("/crews")
-def crews() -> list[dict]:
-    return reports.list_crews(db())
+@app.get("/report-types")
+def report_types() -> dict:
+    """What people can report: {type: {en, sw, profile}}. Comes from the audit profiles."""
+    return reports.report_types()
 
 
-class TaskCreate(BaseModel):
-    report_id: int
-    crew_id: int
-    notes: str = ""
+# ------------------------------------------------- place check, chat, questions
+class Spot(BaseModel):
+    lat: float
+    lon: float
 
 
-@app.post("/tasks")
-def create_task(body: TaskCreate) -> dict:
+@app.post("/check")
+def check(body: Spot) -> dict:
+    """What TerraSat knows about one spot: flood risk class, riparian reserve, 2024 flood,
+    past floods, reports and neighbours' answers nearby."""
     try:
-        return reports.create_task(db(), body.report_id, body.crew_id, body.notes)
+        return assistant.check_place(db(), body.lon, body.lat)
+    except ValueError as e:
+        fail(e)
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class AskRequest(BaseModel):
+    message: str
+    lang: Literal["en", "sw"] = "en"
+    lat: Optional[float] = None      # the map pin, or the phone's location
+    lon: Optional[float] = None
+    on_site: bool = False            # true when lat/lon is the phone's own GPS (then quick questions are asked)
+    device_id: str = ""
+    history: list[ChatTurn] = []
+
+
+@app.post("/ask")
+def ask(body: AskRequest) -> dict:
+    """Ask anything about a place: Muse Spark picks the analysis (flood, solar, densification,
+    business site...) and the place, TerraSat runs it there (satellite picture + rules + ground truth),
+    and Muse Spark answers with a verdict. Returns the reply, highlights, the audit (picture, GeoJSON)
+    and, for people on site, a quick question."""
+    try:
+        return assistant.ask(db(), body.message, body.lang, body.lat, body.lon, body.device_id,
+                             [t.model_dump() for t in body.history], body.on_site)
     except Exception as e:  # noqa: BLE001
         fail(e)
 
 
-@app.get("/tasks")
-def get_tasks(crew_id: Optional[int] = None) -> list[dict]:
-    return reports.list_tasks(db(), crew_id)
+class Observation(BaseModel):
+    question_id: str
+    answer: str
+    lat: float
+    lon: float
+    device_id: str = ""
+    lang: Literal["en", "sw"] = "en"
 
 
-@app.patch("/tasks/{task_id}")
-def patch_task(task_id: int, status: str = Form(...), notes: Optional[str] = Form(None),
-               photo: Optional[UploadFile] = File(None)) -> dict:
-    """Crew updates: en_route / cleared, optionally with an after photo."""
+@app.post("/observations")
+def observe(body: Observation) -> dict:
+    """Save a tap-to-answer reply and return the next question for this spot (or null)."""
     try:
-        out = reports.update_task(db(), task_id, status, notes, photo.file.read() if photo else None,
-                                  Path(photo.filename or "").suffix.lower() if photo else ".jpg")
+        saved = reports.save_observation(db(), body.device_id, body.lat, body.lon, body.question_id, body.answer)
     except ValueError as e:
         fail(e)
-    if not out:
-        raise HTTPException(404, "task not found")
-    return out
+    profile = reports.questions()[body.question_id]["profile"]
+    return {"saved": saved, "next": assistant.next_question(db(), body.device_id, body.lon, body.lat, body.lang, profile)}
