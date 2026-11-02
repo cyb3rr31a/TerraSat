@@ -6,19 +6,21 @@ Used by scripts/run_audit.py and the API.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from backend.app.core.config import settings
 from backend.app.profiles.loader import Profile, load_profile
 from backend.app.services import meta
 from backend.app.services.analyzers import (AnalysisContext, AnalysisResult, choke_point_summary,
                                             rank_choke_points, run_analyzer)
 from backend.app.services.layers import load_layers
 from backend.app.services.sam_service import (Detection, MetaSAMBackend, SegmentationBackend,
-                                              render_overlay, segment_mosaic_cached)
+                                              render_analysis, segment_mosaic_cached)
 from backend.app.services.tiles import Mosaic, TileCache, build_mosaic
 
 BackendFactory = Callable[[Mosaic], SegmentationBackend]
@@ -61,14 +63,34 @@ def run_audit(profile_id: str, lon: float, lat: float, *,
 
 
 def save_audit(out: AuditOutput, folder: Path) -> dict:
-    """Write mosaic.jpg, overlay.png, audit.geojson and summary.json; return what a UI needs."""
+    """Write mosaic.jpg, overlay.jpg (results drawn on the picture), audit.geojson and summary.json."""
     folder.mkdir(parents=True, exist_ok=True)
     meta = out.mosaic.save(folder / "mosaic")
-    render_overlay(out.mosaic, out.detections, out.profile.sam_classes()).save(folder / "overlay.png")
+    render_analysis(out.mosaic, out.result.geojson["features"]).convert("RGB").save(folder / "overlay.jpg", quality=85)
     (folder / "audit.geojson").write_text(json.dumps(out.result.geojson))
     info = {"profile": out.profile.id, "bounds": meta["bounds"], "summary": out.result.summary}
     (folder / "summary.json").write_text(json.dumps(info, indent=2))
     return info
+
+
+def cached_audit(profile_id: str, lon: float, lat: float, params: Optional[dict] = None,
+                 side_m: Optional[float] = None, refresh: bool = False) -> dict:
+    """Run an audit once and reuse it: results live in data/outputs/api/<audit_id>/.
+    Returns what a UI needs: id, centre, bounds, summary and file URLs."""
+    load_profile(profile_id)  # unknown profile -> KeyError before any work
+    params = params or {}
+    key = json.dumps([profile_id, round(lon, 5), round(lat, 5), params] + ([side_m] if side_m else []),
+                     sort_keys=True)
+    audit_id = hashlib.sha1(key.encode()).hexdigest()[:12]
+    folder = Path(settings.data_dir) / "outputs" / "api" / audit_id
+    if (folder / "summary.json").exists() and not refresh:
+        info = json.loads((folder / "summary.json").read_text())
+    else:
+        info = save_audit(run_audit(profile_id, lon, lat, params=params, side_m=side_m), folder)
+    base = f"/outputs/api/{audit_id}"
+    return {"audit_id": audit_id, "center": {"lon": lon, "lat": lat}, **info,
+            "files": {"geojson": f"{base}/audit.geojson", "overlay": f"{base}/overlay.jpg",
+                      "mosaic": f"{base}/mosaic.jpg"}}
 
 
 def ranked_choke_points(folder: Path, reports: list[dict]) -> list[dict]:
@@ -106,12 +128,13 @@ def write_memo(folder: Path, reports: list[dict], lang: str = "en") -> dict:
         f"Write in {LANGUAGES[lang]}. Use these sections as markdown headings: {', '.join(profile.memo.sections)}.\n"
         "Rules:\n"
         "- Use only facts from DATA below or from web pages you open and cite. If something is unknown, say so.\n"
-        "- Search the web for the Kenya Meteorological Department's latest forecast for Nairobi for the next "
-        "7 days, summarise it with a citation, and say which places in DATA to warn first if heavy rain is coming.\n"
-        "- Name choke points by rank, road and watercourse, with lat, lon to 5 decimals.\n"
-        "- Cite where facts come from: (TerraSat audit), (UNOSAT 2024), (resident reports), or the source URL "
-        "for past incidents.\n"
-        "- Under 450 words. Plain language for officers in the field.\n\n"
+        + ("- Search the web for the Kenya Meteorological Department's latest forecast for Nairobi for the next "
+           "7 days, summarise it with a citation, and say which places in DATA to warn first if heavy rain is coming.\n"
+           if profile.id == "flood" else "")
+        + ("- Name choke points by rank, road and watercourse, with lat, lon to 5 decimals.\n" if chokes else "")
+        + "- Cite where facts come from: (TerraSat audit), (UNOSAT 2024), (resident reports), or the source URL "
+        "for past incidents. Mark estimates and assumptions as such.\n"
+        "- Under 450 words. Plain language for the reader.\n\n"
         f"DATA:\n{json.dumps({'audit_summary': summary, 'resident_reports': nearby}, default=str)}")
     ans = meta.spark(prompt, web_search=True)
     sources = {c["url"]: c.get("title") for c in ans["citations"] if c.get("url")}
