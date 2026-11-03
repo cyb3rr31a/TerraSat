@@ -17,6 +17,8 @@ TerraSat helps **home buyers, developers, agents, lenders, county planners and r
 
 Each answer comes with the **satellite picture of the area with the findings drawn on it**.
 
+<img width="960" height="450" alt="Screenshot 2026-11-03 095508" src="https://github.com/user-attachments/assets/c332ae81-9800-42dc-99d2-6eeaf6b59458" />
+
 Under the hood TerraSat is a geospatial auditing engine. Drop a pin or say what you need. TerraSat pulls current satellite imagery, uses **SAM 3.1** to find what the question requires (roofs, solar panels, garbage piles, water…), applies spatial rules (buffers, rings, distances) against map layers, and returns metrics, a verdict and a **Muse Spark** memo grounded in live web search, plus GeoJSON and CSV exports for QGIS.
 
 > **One engine, many use cases.** Flood exposure, solar and mini-grid siting, heat islands, property-rates gaps and more all run on the same pipeline. Each use case is an **audit profile**, a short YAML file that says what to look for, which layers to load, which rules apply and what the memo should cover.
