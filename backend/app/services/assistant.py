@@ -20,6 +20,7 @@ import httpx
 from shapely.geometry import Point, shape
 
 from backend.app.core.config import settings
+from backend.app.core.security import GOOGLE_BUDGET
 from backend.app.profiles.loader import list_profiles, load_profile
 from backend.app.services import geo, meta, reports
 from backend.app.services.audit import cached_audit
@@ -200,6 +201,10 @@ def next_question(db, device_id: str, lon: float, lat: float, lang: str = "en", 
 
 
 # ------------------------------------------------------ competitors (Google)
+class GoogleLimitReached(Exception):
+    """Today's cap on Google Places calls (GOOGLE_CALLS_PER_DAY) is used up."""
+
+
 def google_competitors(business: Optional[str], lon: float, lat: float, radius_m: float) -> Optional[dict]:
     """Businesses of this kind within radius_m from Google Maps (Places API (New) Text Search, up to
     60 results). Google lists far more small businesses in Nairobi than OpenStreetMap. Fetched live
@@ -218,6 +223,10 @@ def google_competitors(business: Optional[str], lon: float, lat: float, radius_m
     found: list[dict] = []
     with httpx.Client(timeout=20) as c:
         for _ in range(3):  # 20 per page, 60 at most
+            if not GOOGLE_BUDGET.take():
+                if not found:
+                    raise GoogleLimitReached()
+                break  # keep the pages already fetched
             r = c.post("https://places.googleapis.com/v1/places:searchText", json=body, headers=headers)
             r.raise_for_status()
             page = r.json()
@@ -381,6 +390,9 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
             except httpx.HTTPError as e:
                 google = None
                 notes.append(f"Google Maps competitor search failed ({e.__class__.__name__}); using OpenStreetMap only.")
+            except GoogleLimitReached:
+                google = None
+                notes.append("Today's Google Maps limit is used up; competitors come from OpenStreetMap only.")
             if google and audit:
                 people = audit["summary"].get("people_in_catchment_est", 0)
                 google["people_per_competitor_est"] = round(people / (google["count"] + 1))
