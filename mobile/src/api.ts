@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File } from 'expo-file-system';
 
 export type Lang = 'en' | 'sw';
-export type Settings = { apiUrl: string; lang: Lang; deviceId: string; onboarded: boolean;
+export type Settings = { apiUrl: string; apiKey: string; lang: Lang; deviceId: string; onboarded: boolean;
                          theme: 'system' | 'light' | 'dark' };
 export type Tone = 'good' | 'mixed' | 'poor';
 
@@ -37,7 +37,8 @@ export const newId = () => `${Date.now().toString(36)}-${Math.random().toString(
 
 export async function loadSettings(): Promise<Settings> {
   const saved = JSON.parse((await AsyncStorage.getItem(SETTINGS_KEY)) ?? '{}');
-  const s: Settings = { apiUrl: process.env.EXPO_PUBLIC_API_URL ?? '', lang: 'en', deviceId: newId(), onboarded: false,
+  const s: Settings = { apiUrl: process.env.EXPO_PUBLIC_API_URL ?? '', apiKey: process.env.EXPO_PUBLIC_API_KEY ?? '',
+                        lang: 'en', deviceId: newId(), onboarded: false,
                         theme: 'system', ...saved };
   await saveSettings(s); // keeps the same deviceId from now on
   return s;
@@ -46,7 +47,11 @@ export async function loadSettings(): Promise<Settings> {
 export const saveSettings = (s: Settings) => AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 
 let base = '';
+let headers: Record<string, string> = {}; // the API key, and the device id the server rate-limits by
 export const setApiUrl = (url: string) => { base = url.trim().replace(/\/+$/, ''); };
+export const setIdentity = (apiKey: string, deviceId: string) => {
+  headers = { ...(apiKey.trim() ? { 'X-API-Key': apiKey.trim() } : {}), 'X-Device-Id': deviceId };
+};
 export const mediaUrl = (name: string) => `${base}/media/${name}`;
 export const fileUrl = (path: string) => base + path; // e.g. /outputs/api/<id>/overlay.jpg
 
@@ -59,7 +64,9 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(base + path, { ...init, signal: ctrl.signal });
+    const res = await fetch(base + path, { ...init, headers: { ...(init.headers as Record<string, string>), ...headers },
+                                          signal: ctrl.signal });
+    if (res.status === 429) throw new ApiError(429, 'Too many requests. Please wait a minute and try again.');
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new ApiError(res.status, body.detail ?? `HTTP ${res.status}`);
@@ -79,6 +86,7 @@ const json = (body: unknown): RequestInit => ({
 
 export const api = {
   health: () => request<{ status: string }>('/health', {}, 8000),
+  ping: () => request<Record<string, unknown>>('/report-types', {}, 8000), // needs the API key, unlike /health
   ask: (body: { message: string; lang: Lang; lat?: number; lon?: number; on_site: boolean; device_id: string;
                 history: ChatTurn[] }) => request<AskReply>('/ask', json(body), 150000), // a fresh audit takes ~1 min
   observe: (body: { question_id: string; answer: string; lat: number; lon: number; device_id: string; lang: Lang }) =>
@@ -131,7 +139,8 @@ export async function flushQueue(deviceId: string): Promise<{ sent: number; reje
         await sendReport(r, deviceId);
         result.sent++;
       } catch (e) {
-        if (!(e instanceof ApiError) || e.status === 0 || e.status >= 500) { // offline or server down
+        // offline, server down, rate-limited or a wrong key: keep the report and try again later
+        if (!(e instanceof ApiError) || [0, 401, 403, 429].includes(e.status) || e.status >= 500) {
           result.error = (e as Error).message;
           break;
         }
