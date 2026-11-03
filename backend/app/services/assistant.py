@@ -104,6 +104,14 @@ def _gazetteer() -> list[tuple[str, str, str, float, float]]:
             kind = p.get("place") or next((v for k, v in p.items() if k in LANDMARKS and v in LANDMARKS[k]), None)
             if p.get("name") and kind:
                 out.append((p["name"].lower(), p["name"], kind, lon, lat))
+    roads: dict[str, list] = {}  # named roads, pinned at the middle of their longest piece
+    path = layer_path("osm_roads")
+    if path.exists():
+        for f in json.loads(path.read_text(encoding="utf-8"))["features"]:
+            name, line = f["properties"].get("name"), f["geometry"]["coordinates"]
+            if name and f["geometry"]["type"] == "LineString" and len(line) > len(roads.get(name.lower(), [name, []])[1]):
+                roads[name.lower()] = [name, line]
+    out += [(low, name, "road", *line[len(line) // 2][:2]) for low, (name, line) in roads.items()]
     return out
 
 
@@ -112,7 +120,7 @@ def search_places(q: str, limit: int = 8) -> list[dict]:
     q = q.strip().lower()
     if len(q) < 2:
         return []
-    order = {"suburb": 0, "neighbourhood": 1, "quarter": 1, "village": 2, "locality": 2}
+    order = {"suburb": 0, "neighbourhood": 1, "quarter": 1, "village": 2, "locality": 2, "road": 3}
     hits = [g for g in _gazetteer() if q in g[0]]
     hits.sort(key=lambda g: (not g[0].startswith(q), order.get(g[2], 3), len(g[0])))
     seen, out = set(), []
