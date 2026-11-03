@@ -1,7 +1,10 @@
 """
 TerraSat API. Business logic lives in app/services and use cases in
 app/profiles; the mobile app and the dashboard both call these endpoints.
-Interactive docs: http://127.0.0.1:8000/docs
+Interactive docs: http://127.0.0.1:8000/docs (click "Authorize" to enter the API key)
+
+Access: every endpoint except /health needs the X-API-Key header once API_KEY is set in .env;
+staff-only endpoints also need X-Staff-Key. Limits and keys live in core/security.py.
 """
 import csv
 import io
@@ -11,17 +14,19 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.app.core.config import settings
+from backend.app.core.security import (ASK_LIMIT, LIGHT_LIMIT, REPORT_LIMIT, is_staff, limited, require_api_key,
+                                       require_staff)
 from backend.app.profiles.loader import list_profiles, load_profile
 from backend.app.services import assistant, reports
 from backend.app.services.audit import PRESETS, cached_audit, ranked_choke_points, write_memo
 
-app = FastAPI(title="TerraSat", version="0.4.0",
+app = FastAPI(title="TerraSat", version="0.5.0", dependencies=[Depends(require_api_key)],
               description="Urban planning assistant on a geospatial auditing engine: satellite imagery + SAM 3.1 + "
                           "spatial rules + Muse Spark, configured by audit profiles, plus ground truth from people "
                           "(reports, quick questions, chat). Case study: Nairobi flood risk.")
@@ -52,6 +57,15 @@ def fail(e: Exception):
     if isinstance(e, (httpx.HTTPError, RuntimeError)):  # Meta / Mapbox down, or a key missing
         raise HTTPException(502, f"Upstream service failed: {e}")
     raise e  # a bug: 500, with the full traceback in the server log
+
+
+def read_upload(f: UploadFile, max_mb: float, what: str) -> bytes:
+    """The upload's bytes, refusing anything over max_mb before reading it all into memory."""
+    limit = int(max_mb * 1024 * 1024)
+    data = f.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(413, f"{what} is too large (max {max_mb:g} MB)")
+    return data
 
 
 def csv_response(rows: list[dict], filename: str) -> Response:
@@ -101,7 +115,7 @@ class AuditRequest(BaseModel):
     refresh: bool = False   # re-run even if cached (e.g. after new layers or code)
 
 
-@app.post("/audit")
+@app.post("/audit", dependencies=[Depends(limited(ASK_LIMIT))])
 def audit(req: AuditRequest) -> dict:
     """Run (or reuse) an audit. Results are cached on disk, so repeats are instant."""
     if req.preset:
@@ -130,7 +144,7 @@ def choke_points(audit_id: str, format: Literal["json", "csv"] = "json"):
     return csv_response(rows, f"choke_points_{audit_id}.csv") if format == "csv" else rows
 
 
-@app.post("/audit/{audit_id}/memo")
+@app.post("/audit/{audit_id}/memo", dependencies=[Depends(limited(ASK_LIMIT))])
 def memo(audit_id: str, lang: Literal["en", "sw"] = "en", refresh: bool = False) -> dict:
     """Briefing memo by Muse Spark, with sources. Cached; refresh=true writes a new one
     (e.g. after new reports or a new forecast). Download: /outputs/api/<audit_id>/memo_<lang>.md"""
@@ -145,24 +159,27 @@ def memo(audit_id: str, lang: Literal["en", "sw"] = "en", refresh: bool = False)
 
 
 # ------------------------------------------------------- citizen reports
-@app.post("/reports")
+@app.post("/reports", dependencies=[Depends(limited(REPORT_LIMIT))])
 def create_report(audio: UploadFile = File(...), lat: Optional[float] = Form(None), lon: Optional[float] = Form(None),
                   accuracy_m: Optional[float] = Form(None), device_id: str = Form(""),
                   client_id: Optional[str] = Form(None), photo: Optional[UploadFile] = File(None)) -> dict:
     """A resident's voice note (any audio format) with GPS and an optional photo."""
+    audio_bytes = read_upload(audio, settings.max_audio_mb, "The voice note")
+    photo_bytes = read_upload(photo, settings.max_photo_mb, "The photo") if photo else None
     try:
         return reports.create_report(
-            db(), audio.file.read(), Path(audio.filename or "").suffix.lower() or ".m4a", lat, lon, accuracy_m,
-            photo.file.read() if photo else None, Path(photo.filename or "").suffix.lower() if photo else ".jpg",
-            device_id, client_id)
+            db(), audio_bytes, Path(audio.filename or "").suffix.lower() or ".m4a", lat, lon, accuracy_m,
+            photo_bytes, Path(photo.filename or "").suffix.lower() if photo else ".jpg", device_id, client_id)
     except Exception as e:  # noqa: BLE001
         fail(e)
 
 
 @app.get("/reports")
 def get_reports(status: Optional[str] = None, device_id: Optional[str] = None, since: Optional[str] = None,
-                format: Literal["json", "csv"] = "json"):
-    """Dashboard feed (filter by status / since) or one resident's reports (device_id). format=csv to export."""
+                format: Literal["json", "csv"] = "json", x_staff_key: Optional[str] = Header(None)):
+    """One person's reports (device_id), or, for staff, everyone's (filter by status / since; format=csv)."""
+    if not device_id and not is_staff(x_staff_key):
+        raise HTTPException(403, "Give your device_id, or send the X-Staff-Key header to see everyone's reports")
     rows = reports.list_reports(db(), status, device_id, since)
     if format == "csv":
         keep = ("id", "created_at", "status", "issue_type", "urgency", "place", "lat", "lon", "location_source",
@@ -178,7 +195,7 @@ class ReportUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-@app.patch("/reports/{report_id}")
+@app.patch("/reports/{report_id}", dependencies=[Depends(require_staff)])
 def patch_report(report_id: int, body: ReportUpdate) -> dict:
     try:
         out = reports.update_report(db(), report_id, body.status, body.notes)
@@ -189,7 +206,7 @@ def patch_report(report_id: int, body: ReportUpdate) -> dict:
     return out
 
 
-@app.get("/places")
+@app.get("/places", dependencies=[Depends(limited(LIGHT_LIMIT))])
 def places(q: str) -> list[dict]:
     """Place suggestions while typing (suburbs and landmarks in Nairobi)."""
     return assistant.search_places(q)
@@ -207,7 +224,7 @@ class Spot(BaseModel):
     lon: float
 
 
-@app.post("/check")
+@app.post("/check", dependencies=[Depends(limited(LIGHT_LIMIT))])
 def check(body: Spot) -> dict:
     """What TerraSat knows about one spot: flood risk class, riparian reserve, 2024 flood,
     past floods, reports and neighbours' answers nearby."""
@@ -219,20 +236,20 @@ def check(body: Spot) -> dict:
 
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
-    text: str
+    text: str = Field(max_length=4000)
 
 
 class AskRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=1000)
     lang: Literal["en", "sw"] = "en"
     lat: Optional[float] = None      # the map pin, or the phone's location
     lon: Optional[float] = None
     on_site: bool = False            # true when lat/lon is the phone's own GPS (then quick questions are asked)
     device_id: str = ""
-    history: list[ChatTurn] = []
+    history: list[ChatTurn] = Field(default=[], max_length=12)
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(limited(ASK_LIMIT))])
 def ask(body: AskRequest) -> dict:
     """Ask anything about a place: Muse Spark picks the analysis (flood, solar, densification,
     business site...) and the place, TerraSat runs it there (satellite picture + rules + ground truth),
@@ -254,7 +271,7 @@ class Observation(BaseModel):
     lang: Literal["en", "sw"] = "en"
 
 
-@app.post("/observations")
+@app.post("/observations", dependencies=[Depends(limited(LIGHT_LIMIT))])
 def observe(body: Observation) -> dict:
     """Save a tap-to-answer reply and return the next question for this spot (or null)."""
     try:
