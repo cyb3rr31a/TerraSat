@@ -246,25 +246,31 @@ export default function App() {
 function PlaceSearch({ onPick }: { onPick: (p: PlaceHit) => void }) {
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<PlaceHit[]>([])
+  const [note, setNote] = useState('')  // "no matches" or why the search failed, instead of silence
   useEffect(() => {
+    setNote('')
     if (q.trim().length < 2) { setHits([]); return }
-    const t = setTimeout(() => api.places(q).then(setHits).catch(() => setHits([])), 200)
+    const t = setTimeout(() => api.places(q)
+      .then((h) => { setHits(h); if (!h.length) setNote('No matching place. Try a suburb or landmark, or click the map.') })
+      .catch((e: Error) => { setHits([]); setNote(e.message) }), 200)
     return () => clearTimeout(t)
   }, [q])
+  const pick = (h: PlaceHit) => { onPick(h); setQ(''); setHits([]) }
   return (
     <div className="search">
       <Search size={16} />
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a place: Westlands, Sarit Centre, Ruaka…"
-        aria-label="Find a place" />
+        aria-label="Find a place" onKeyDown={(e) => { if (e.key === 'Enter' && hits[0]) pick(hits[0]) }} />
       {hits.length > 0 && (
         <ul className="hits">
           {hits.map((h) => (
-            <li key={`${h.name}${h.lat}`}><button onClick={() => { onPick(h); setQ(''); setHits([]) }}>
+            <li key={`${h.name}${h.lat}`}><button onClick={() => pick(h)}>
               <MapPin size={14} /><b>{h.name}</b><span>{h.kind.replace(/_/g, ' ')}</span>
             </button></li>
           ))}
         </ul>
       )}
+      {note && <ul className="hits"><li className="hit-note">{note}</li></ul>}
     </div>
   )
 }
