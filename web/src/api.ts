@@ -1,5 +1,7 @@
 // TerraSat API client for the web app.
 export const API = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '')
+// Sent with every request once the server sets API_KEY. It ships in the page, so it's a gate, not a secret.
+const KEY = import.meta.env.VITE_API_KEY ?? ''
 
 export type Lang = 'en' | 'sw'
 export type Turn = { role: 'user' | 'assistant'; text: string }
@@ -27,8 +29,15 @@ export type Memo = { lang: Lang; markdown: string; sources: { url: string; title
 export type Feature = { geometry: { type: string; coordinates: number[] }; properties: Record<string, unknown> }
 export type PlaceHit = { name: string; kind: string; lat: number; lon: number }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API + path, init)
+async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(API + path, { ...init, headers: { ...(init.headers ?? {}), ...(KEY ? { 'X-API-Key': KEY } : {}) } })
+  } catch {
+    throw new Error(`Can't reach the TerraSat server at ${API}. Check that it's running and that VITE_API_URL points to it.`)
+  }
+  if (res.status === 401) throw new Error('The server rejected the access key. Check VITE_API_KEY.')
+  if (res.status === 429) throw new Error('Too many questions in a short time. Please wait a minute and try again.')
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail ?? `HTTP ${res.status}`)
