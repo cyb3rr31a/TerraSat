@@ -159,7 +159,10 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 | `cd web` then `npm install` and `npm run dev` | Starts the web app at http://localhost:5173 (the API must be running; set `VITE_API_URL` in `web/.env` if it isn't on 127.0.0.1:8000) |
 | `cd mobile` then `npm install` and `npx expo start` | Starts the mobile app; scan the QR code with Expo Go (Android). In the app, open ⚙ and enter the API address, e.g. `http://192.168.1.20:8000` (run uvicorn with `--host 0.0.0.0`) |
 
-**Public demo (web app on Vercel):** the API needs the local data files, so it runs on the laptop and is exposed with a Cloudflare tunnel: `cloudflared tunnel --url http://localhost:8000`. In Vercel, set Root Directory to `web`, add `VITE_API_URL` (the `https://….trycloudflare.com` address, no trailing slash) and `VITE_API_KEY` (the backend's `API_KEY`), then redeploy. Vite bakes these in at build time, so a new tunnel address needs a redeploy.
+**Public demo:** the API runs on a Hugging Face Space (Docker, see `Dockerfile`) and the web app on Vercel.
+- Space: create a Docker Space, add the backend `.env` values as Space secrets, then `python scripts/deploy_space.py <user>/terrasat-api` (uploads code + map data; never `.env` or residents' recordings).
+- Vercel: Root Directory `web`; set `VITE_API_URL` (`https://<user>-terrasat-api.hf.space`) and `VITE_API_KEY` (the `API_KEY` secret); redeploy after changing them.
+- Free Spaces sleep after 48 h without visits and reset their disk on restart (new reports are lost); open the Space page to wake it.
 
 SAM calls are cached, so repeating a run costs nothing. Imagery comes from the Mapbox Static Images API (`TILE_PROVIDER=mapbox_static`); `esri` is a no-key fallback for development.
 
