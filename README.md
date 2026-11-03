@@ -157,6 +157,8 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 | `cd web` then `npm install` and `npm run dev` | Starts the web app at http://localhost:5173 (the API must be running; set `VITE_API_URL` in `web/.env` if it isn't on 127.0.0.1:8000) |
 | `cd mobile` then `npm install` and `npx expo start` | Starts the mobile app; scan the QR code with Expo Go (Android). In the app, open ⚙ and enter the API address, e.g. `http://192.168.1.20:8000` (run uvicorn with `--host 0.0.0.0`) |
 
+**Public demo (web app on Vercel):** the API needs the local data files, so it runs on the laptop and is exposed with a Cloudflare tunnel: `cloudflared tunnel --url http://localhost:8000`. In Vercel, set Root Directory to `web`, add `VITE_API_URL` (the `https://….trycloudflare.com` address, no trailing slash) and `VITE_API_KEY` (the backend's `API_KEY`), then redeploy. Vite bakes these in at build time, so a new tunnel address needs a redeploy.
+
 SAM calls are cached, so repeating a run costs nothing. Imagery comes from the Mapbox Static Images API (`TILE_PROVIDER=mapbox_static`); `esri` is a no-key fallback for development.
 
 ## API
@@ -180,12 +182,28 @@ Start it with `uvicorn backend.app.main:app --reload`; interactive docs at http:
 
 Report statuses: `corroborated` / `unconfirmed` -> `assigned` -> `cleared` (or `dismissed`). Data is stored in `data/terrasat.db` (SQLite) and `data/media/`.
 
+## Access and limits
+
+Before the API gets a public address, set two keys in `.env` (make each with
+`python -c "import secrets; print(secrets.token_urlsafe(24))"`):
+
+| Setting | What it does |
+|---|---|
+| `API_KEY` | Every endpoint except `/health` needs the `X-API-Key` header. The apps send it: web via `VITE_API_KEY` in `web/.env`, phone via Settings → Advanced → Access key. It keeps strangers out, but it ships inside the apps, so it isn't a password. Empty = checks off (local development). |
+| `STAFF_KEY` | Needed (header `X-Staff-Key`) to list everyone's reports, export them as CSV, or change a report's status. Never put it in the apps. People see only their own reports (by their phone's device id). |
+| Rate limits | Per IP address and per phone (`X-Device-Id`): questions and memos 10/min and 100/day (`ASK_PER_MINUTE`, `ASK_PER_DAY`), voice reports 5/min and 50/day; place search and quick answers 120/min. Over the limit: HTTP 429 with `Retry-After`. Behind the Cloudflare tunnel the visitor's IP comes from `CF-Connecting-IP`. |
+| `GOOGLE_CALLS_PER_DAY` | Cap on Google Places calls for the whole server (default 300). When it's used up, business answers use OpenStreetMap competitors and say so. |
+| Upload limits | Voice notes up to 10 MB (`MAX_AUDIO_MB`) and photos up to 5 MB (`MAX_PHOTO_MB`), refused with HTTP 413 before they're read into memory; audio longer than 2 minutes is cut before transcription. Question text is capped at 1,000 characters. |
+
+Limits are kept in memory and reset when the server restarts; a production setup would keep them in Redis.
+
 ## Project layout
 
 ```
 backend/app/
   main.py                 FastAPI endpoints (ask, audits, reports, place check)
   core/config.py          settings from .env
+  core/security.py        API key, staff key, rate limits, Google daily cap
   profiles/*.yaml         audit profiles: one file per use case
   profiles/loader.py      profile schema + validation
   services/audit.py       run_audit(profile, lon, lat): the whole pipeline + demo sites
