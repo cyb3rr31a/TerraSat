@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-MAX_SECONDS = 600  # API limit: 10 minutes
+MAX_SECONDS = 120  # the app records up to 60 s; anything longer is cut (the transcription API allows 10 min)
 
 
 def ffmpeg_exe() -> str:
