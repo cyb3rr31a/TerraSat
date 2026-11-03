@@ -7,8 +7,15 @@ from backend.app.core.config import settings
 from backend.app.services import reports
 
 
+STAFF = {"X-Staff-Key": "staff-test-key"}
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    from backend.app.core import security
+    for limiter in (security.ASK_LIMIT, security.REPORT_LIMIT, security.LIGHT_LIMIT):
+        limiter.hits.clear()                                  # each test starts with fresh rate limits
+    monkeypatch.setattr(settings, "staff_key", STAFF["X-Staff-Key"])
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(main, "_db", reports.connect(tmp_path / "test.db"))
     monkeypatch.setattr(reports.audio, "to_wav", lambda data, suffix: b"wav")
@@ -32,14 +39,15 @@ def test_report_flow(client):
     assert r["summary_sw"] and r["context"]["corroborated"] is True
     assert post_report(client).json()["id"] == r["id"]           # offline-queue retry: no duplicate
     assert len(client.get("/reports", params={"device_id": "phone-1"}).json()) == 1
-    assert client.patch(f"/reports/{r['id']}", json={"status": "resolved"}).json()["status"] == "resolved"
+    assert client.patch(f"/reports/{r['id']}", json={"status": "resolved"}).status_code == 403   # staff only
+    assert client.patch(f"/reports/{r['id']}", json={"status": "resolved"}, headers=STAFF).json()["status"] == "resolved"
     assert client.get("/reports", params={"device_id": "phone-1"}).json()[0]["status"] == "resolved"
 
 
 def test_bad_inputs(client):
-    assert client.patch("/reports/999", json={"status": "resolved"}).status_code == 404
+    assert client.patch("/reports/999", json={"status": "resolved"}, headers=STAFF).status_code == 404
     rid = post_report(client).json()["id"]
-    assert client.patch(f"/reports/{rid}", json={"status": "flying"}).status_code == 400
+    assert client.patch(f"/reports/{rid}", json={"status": "flying"}, headers=STAFF).status_code == 400
     assert client.post("/audit", json={"profile": "flood"}).status_code == 400
     assert client.post("/audit", json={"profile": "nope", "preset": "mathare"}).status_code == 400
 
@@ -118,7 +126,8 @@ def test_choke_points_rerank_with_reports_and_export(client, monkeypatch, tmp_pa
     assert drain["reports_nearby"] == 3 and drain["rank"] == 1
     csv_text = client.get(f"/audit/{aid}/choke-points", params={"format": "csv"}).text
     assert csv_text.startswith("rank,score,kind") and len(csv_text.strip().splitlines()) == 3
-    assert client.get("/reports", params={"format": "csv"}).text.count("blocked_drain") == 3
+    assert client.get("/reports", params={"format": "csv"}).status_code == 403                    # staff only
+    assert client.get("/reports", params={"format": "csv"}, headers=STAFF).text.count("blocked_drain") == 3
     assert client.get("/audit/../../etc/choke-points").status_code == 404
     assert client.get("/audit/ffffffffffff/choke-points").status_code == 404
 
@@ -269,3 +278,41 @@ def test_spark_returns_only_the_final_answer(monkeypatch):
     ans = meta.spark("q", web_search=True)
     assert ans["text"] == "Verdict: medium density." and ans["web_searches"] == 2
     assert [c["url"] for c in ans["citations"]] == ["https://a.org", "https://b.org"]      # all sources, no repeats
+
+
+
+def test_api_key_staff_key_rate_limits_and_upload_size(client, monkeypatch):
+    from backend.app.core import security
+    monkeypatch.setattr(settings, "api_key", "app-key")
+    assert client.get("/health").status_code == 200                                   # always open
+    assert client.get("/profiles").status_code == 401                                 # no key
+    assert client.get("/profiles", headers={"X-API-Key": "wrong"}).status_code == 401
+    key = {"X-API-Key": "app-key"}
+    assert client.get("/profiles", headers=key).status_code == 200
+    assert client.get("/reports", headers=key).status_code == 403                     # everyone's: staff only
+    assert client.get("/reports", params={"device_id": "phone-1"}, headers=key).status_code == 200
+    assert client.get("/reports", headers={**key, **STAFF}).status_code == 200
+
+    monkeypatch.setattr(security.REPORT_LIMIT, "per_minute", 2)
+    phone = {**key, "X-Device-Id": "phone-1"}
+    send = lambda cid: client.post("/reports", data={"client_id": cid, "lat": "-1.26", "lon": "36.86"},
+                                   files={"audio": ("n.m4a", b"x", "audio/mp4")}, headers=phone)
+    assert send("a").status_code == 200 and send("b").status_code == 200
+    third = send("c")
+    assert third.status_code == 429 and third.headers["Retry-After"] == "60"
+
+    security.REPORT_LIMIT.hits.clear()
+    monkeypatch.setattr(settings, "max_audio_mb", 0.001)                              # ~1 KB
+    big = client.post("/reports", files={"audio": ("n.m4a", b"x" * 5000, "audio/mp4")}, headers=phone)
+    assert big.status_code == 413 and "too large" in big.json()["detail"]
+
+
+def test_google_daily_cap(monkeypatch):
+    from backend.app.core.security import DailyBudget
+    from backend.app.services import assistant
+    monkeypatch.setattr(assistant, "GOOGLE_BUDGET", DailyBudget(0))
+    monkeypatch.setattr(assistant.settings, "google_maps_api_key", "k")
+    with pytest.raises(assistant.GoogleLimitReached):
+        assistant.google_competitors("pharmacy", 36.8, -1.29, 500)
+    budget = DailyBudget(2)
+    assert budget.take() and budget.take() and not budget.take()
