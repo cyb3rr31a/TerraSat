@@ -4,7 +4,7 @@ import { ActivityIndicator, KeyboardAvoidingView, Pressable, ScrollView, Text, T
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { api, loadReportTypes, loadSettings, saveSettings, setApiUrl, Settings } from './src/api';
+import { api, loadReportTypes, loadSettings, saveSettings, setApiUrl, setIdentity, Settings } from './src/api';
 import Chat from './src/Chat';
 import { MyReports, RecordReport, useReports } from './src/Resident';
 import { Button, Card, IconName, t, ThemeContext, themeFor, useTheme } from './src/ui';
@@ -22,6 +22,7 @@ export default function App() {
   useEffect(() => {
     loadSettings().then((s) => {
       setApiUrl(s.apiUrl);
+      setIdentity(s.apiKey, s.deviceId);
       setSettings(s);
       loadReportTypes();
     });
@@ -30,6 +31,7 @@ export default function App() {
   const update = (patch: Partial<Settings>) => {
     const next = { ...settings!, ...patch };
     setApiUrl(next.apiUrl);
+    setIdentity(next.apiKey, next.deviceId);
     setSettings(next);
     saveSettings(next);
   };
@@ -155,14 +157,15 @@ function SettingsPanel({ settings, onChange, onClose }: {
   const { c, st, tone, ucLift } = useTheme();
   const s = t(settings.lang);
   const [url, setUrl] = useState(settings.apiUrl);
+  const [key, setKey] = useState(settings.apiKey);
   const [status, setStatus] = useState('');
   const [testing, setTesting] = useState(false);
 
   async function test() {
-    onChange({ apiUrl: url });
+    onChange({ apiUrl: url, apiKey: key });
     setTesting(true);
     try {
-      await api.health();
+      await api.ping();
       setStatus(`✓ ${s.connected}`);
     } catch (e) {
       setStatus(`✗ ${(e as Error).message}`);
@@ -197,10 +200,13 @@ function SettingsPanel({ settings, onChange, onClose }: {
         <Text style={st.muted}>{s.serverUrl}</Text>
         <TextInput style={st.input} value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false}
           keyboardType="url" placeholder="http://192.168.1.20:8000" />
+        <Text style={st.muted}>{s.accessKey}</Text>
+        <TextInput style={st.input} value={key} onChangeText={setKey} autoCapitalize="none" autoCorrect={false}
+          secureTextEntry placeholder="API key" placeholderTextColor={c.muted} />
         <Button kind="secondary" icon="pulse-outline" title={s.test} onPress={test} busy={testing} />
         {!!status && <Text style={st.text}>{status}</Text>}
       </Card>
-      <Button title={s.done} onPress={() => { onChange({ apiUrl: url }); onClose(); }} />
+      <Button title={s.done} onPress={() => { onChange({ apiUrl: url, apiKey: key }); onClose(); }} />
     </ScrollView>
   );
 }
