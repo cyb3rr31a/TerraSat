@@ -22,6 +22,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -30,12 +31,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from backend.app.services.audit import PRESETS  # noqa: E402
-from backend.app.services.assistant import geocode  # noqa: E402
+from backend.app.services.assistant import AREA, geocode  # noqa: E402
 from backend.app.services.layers import layer_path  # noqa: E402
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",          # main server
                  "https://overpass.kumi.systems/api/interpreter"]  # mirror if the main one is busy
-NAIROBI_BBOX = (-1.45, 36.65, -1.15, 37.10)  # south, west, north, east
+NAIROBI_BBOX = (AREA[1], AREA[0], AREA[3], AREA[2])  # Greater Nairobi as south, west, north, east
 DEMO_BBOX = (-1.39, 36.77, -1.24, 36.95)     # demo sites only: lighter queries
 
 # layer -> (TerraSat layer name, area, Overpass selectors, tags to keep)
@@ -63,10 +64,30 @@ FLOOD_SITES = ("mathare", "mukuru", "kibera", "korogocho", "east_cluster")
 SITE_HALF_DEG = 0.0105  # ~1.2 km each way: covers the 2.1 km audit square
 
 
-def overpass_query(selectors, bbox):
+def overpass(selectors, bbox, out, parts=3):
+    """Overpass elements for a bbox, fetched in parts x parts tiles so big areas don't time out."""
     s, w, n, e = bbox
-    body = "\n".join(f"  {sel}({s},{w},{n},{e});" for sel in selectors)
-    return f"[out:json][timeout:180];\n(\n{body}\n);\nout tags geom;"
+    dy, dx = (n - s) / parts, (e - w) / parts
+    seen = {}
+    with httpx.Client(timeout=300, headers={"User-Agent": "TerraSat/0.5 (hackathon)"}) as c:
+        for i in range(parts):
+            for j in range(parts):
+                ts, tw = s + i * dy, w + j * dx
+                body = "\n".join(f"  {sel}({ts},{tw},{ts + dy},{tw + dx});" for sel in selectors)
+                query = f"[out:json][timeout:240];\n(\n{body}\n);\n{out};"
+                for url in OVERPASS_URLS:
+                    try:
+                        r = c.post(url, data={"data": query})
+                        r.raise_for_status()
+                        seen.update({(el["type"], el["id"]): el for el in r.json()["elements"]})
+                        break
+                    except (httpx.HTTPError, ValueError) as err:  # busy server or bad JSON
+                        print(f"  {url} failed ({err.__class__.__name__}), trying the next server...")
+                else:
+                    raise RuntimeError("all Overpass servers are busy - try again later")
+                print(f"  tile {i * parts + j + 1}/{parts * parts}: {len(seen)} so far")
+                time.sleep(2)  # be gentle with the shared Overpass servers
+    return {"elements": list(seen.values())}
 
 
 def to_geojson(osm, keep):
@@ -91,42 +112,19 @@ def fetch_osm(name, force=False):
     dst = layer_path(layer)
     if dst.exists() and not force:
         return print(f"{name}: already downloaded")
-    with httpx.Client(timeout=240, headers={"User-Agent": "TerraSat/0.1 (hackathon)"}) as c:
-        for url in OVERPASS_URLS:
-            try:
-                r = c.post(url, data={"data": overpass_query(selectors, bbox)})
-                r.raise_for_status()
-                gj = to_geojson(r.json(), keep)
-                break
-            except (httpx.HTTPError, ValueError) as e:  # busy server or bad JSON
-                print(f"  {url} failed ({e.__class__.__name__}), trying the next server...")
-        else:
-            raise RuntimeError(f"{name}: all Overpass servers are busy - try again later")
+    gj = to_geojson(overpass(selectors, bbox, "out tags geom"), keep)
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps(gj))
     print(f"{name}: {len(gj['features'])} features")
 
 
 def fetch_points(name, force=False):
-    """A point layer for all of Nairobi (ways become their centre point)."""
+    """A point layer for all of Greater Nairobi (ways become their centre point)."""
     layer, selectors, keep = POINT_LAYERS[name]
     dst = layer_path(layer)
     if dst.exists() and not force:
         return print(f"{name}: already downloaded")
-    s, w, n, e = NAIROBI_BBOX
-    body = "\n".join(f"  {sel}({s},{w},{n},{e});" for sel in selectors)
-    query = f"[out:json][timeout:240];\n(\n{body}\n);\nout center tags;"
-    with httpx.Client(timeout=300, headers={"User-Agent": "TerraSat/0.4 (hackathon)"}) as c:
-        for url in OVERPASS_URLS:
-            try:
-                r = c.post(url, data={"data": query})
-                r.raise_for_status()
-                elements = r.json()["elements"]
-                break
-            except (httpx.HTTPError, ValueError) as err:
-                print(f"  {url} failed ({err.__class__.__name__}), trying the next server...")
-        else:
-            raise RuntimeError(f"{name}: all Overpass servers are busy - try again later")
+    elements = overpass(selectors, NAIROBI_BBOX, "out center tags")["elements"]
     feats = []
     for el in elements:
         lat, lon = el.get("lat") or el.get("center", {}).get("lat"), el.get("lon") or el.get("center", {}).get("lon")
@@ -165,11 +163,12 @@ def fetch_buildings(force=False):
 
 
 def fetch_terrain(force=False):
-    """Copernicus GLO-30 elevation (free, AWS Open Data): one 1x1 degree tile per demo area."""
+    """Copernicus GLO-30 elevation (free, AWS Open Data): the 1x1 degree tiles covering Greater Nairobi."""
     import math
     folder = layer_path("copernicus_dem")
     folder.mkdir(parents=True, exist_ok=True)
-    tiles = {(math.floor(lat), math.floor(lon)) for lon, lat in PRESETS.values()}
+    w, s, e, n = AREA
+    tiles = {(math.floor(lat), math.floor(lon)) for lon in (w, e) for lat in (s, n)}  # every tile Greater Nairobi touches
     for lat, lon in sorted(tiles):
         name = (f"Copernicus_DSM_COG_10_{'N' if lat >= 0 else 'S'}{abs(lat):02d}_00_"
                 f"{'E' if lon >= 0 else 'W'}{abs(lon):03d}_00_DEM")
