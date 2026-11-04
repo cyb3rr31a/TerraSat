@@ -144,7 +144,7 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 | Command | What it does |
 |---|---|
 | `python scripts/fetch_data.py` | Downloads rivers, roads, power lines (OpenStreetMap), building footprints (Overture Maps) and elevation (Copernicus GLO-30) to `data/raw/`, and cuts the UNOSAT 2024 flood mapping to each site (download `FL20240426KEN_SHP.zip` from HDX into `data/raw/flood_2024/` first); skips what you already have |
-| `python scripts/fetch_data.py pois` | Shops, services, schools, clinics, markets and bus stops in Nairobi (OpenStreetMap), for the business-site analysis |
+| `python scripts/fetch_data.py pois` | Shops, services, schools, clinics, markets and bus stops in Greater Nairobi (OpenStreetMap), for the business-site analysis |
 | `python scripts/fetch_data.py places` | Suburb and neighbourhood names, for place search in the web app |
 | `python scripts/fetch_data.py flood_history` | Past Nairobi floods (2024, March 2026, Interior Ministry at-risk list) found by Muse Spark web search and mapped with Nominatim |
 | `python scripts/run_audit.py --profile flood --preset mathare` | Runs a full audit; results in `data/outputs/<profile>_<place>/` |
@@ -158,6 +158,8 @@ Run these from the project folder (`C:\hackathons\terrasat`):
 | `python -m pytest -q` | Runs the tests |
 | `cd web` then `npm install` and `npm run dev` | Starts the web app at http://localhost:5173 (the API must be running; set `VITE_API_URL` in `web/.env` if it isn't on 127.0.0.1:8000) |
 | `cd mobile` then `npm install` and `npx expo start` | Starts the mobile app; scan the QR code with Expo Go (Android). In the app, open ⚙ and enter the API address, e.g. `http://192.168.1.20:8000` (run uvicorn with `--host 0.0.0.0`) |
+
+**Coverage:** Greater Nairobi (`AREA` in `assistant.py`): Nairobi, Ruiru, Juja, Thika, Kikuyu, Limuru, Ngong, Rongai, Kitengela and Athi River. For a place outside it, TerraSat says it isn't covered yet instead of guessing; the next version will download map data on demand for anywhere in Kenya.
 
 **Public demo:** the API runs on [Modal](https://modal.com) (`modal_app.py`) and the web app on Vercel.
 - Once: `pip install modal`, `modal setup`, `modal secret create terrasat --from-dotenv .env`, `modal volume create terrasat-data`, then upload the map data: `modal volume put terrasat-data data/raw raw`, `modal volume put terrasat-data data/cache cache`, `modal volume put terrasat-data data/outputs outputs`.
