@@ -28,15 +28,17 @@ type Entry = { id: number; question: string; reply?: AskReply; error?: string; a
 type Recent = { q: string; lat?: number; lon?: number }
 type Pin = { lat: number; lon: number; label?: string; fly?: boolean }
 
-const loadRecent = (): Recent[] => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]') } catch { return [] } }
-const saveRecent = (r: Recent[]) => { try { localStorage.setItem(RECENT_KEY, JSON.stringify(r.slice(0, 8))) } catch { /* private mode */ } }
+const MAX_RECENT = 3
+// Answers follow the device's language: Swahili if it's set to Swahili, English otherwise.
+const lang: Lang = (navigator.language ?? 'en').toLowerCase().startsWith('sw') ? 'sw' : 'en'
+const loadRecent = (): Recent[] => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]').slice(0, MAX_RECENT) } catch { return [] } }
+const saveRecent = (r: Recent[]) => { try { localStorage.setItem(RECENT_KEY, JSON.stringify(r)) } catch { /* private mode */ } }
 const loadTheme = (): Theme => { try { return (localStorage.getItem(THEME_KEY) as Theme) || 'system' } catch { return 'system' } }
 
 export default function App() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [lang, setLang] = useState<Lang>('en')
   const [pin, setPin] = useState<Pin | null>(null)
   const [active, setActive] = useState<AskReply | null>(null)
   const [points, setPoints] = useState<Feature[]>([])
@@ -85,7 +87,7 @@ export default function App() {
         setActive(r)
         setPin({ lat: r.place.lat, lon: r.place.lon, label: r.place.matched?.split(',')[0] ?? at?.label }) // follow-ups stay here
       }
-      const next = [{ q: text, ...(at ?? {}) }, ...recent.filter((x) => x.q !== text)]
+      const next = [{ q: text, ...(at ?? {}) }, ...recent.filter((x) => x.q !== text)].slice(0, MAX_RECENT)
       setRecent(next)
       saveRecent(next)
     } catch (e) {
@@ -173,11 +175,6 @@ export default function App() {
               aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
               {theme === 'light' ? <Sun size={16} /> : theme === 'dark' ? <Moon size={16} /> : <Monitor size={16} />}
             </button>
-            <div className="lang" role="group" aria-label="Answer language">
-              {(['en', 'sw'] as const).map((l) => (
-                <button key={l} aria-pressed={lang === l} onClick={() => setLang(l)}>{l === 'en' ? 'EN' : 'SW'}</button>
-              ))}
-            </div>
           </div>
         </header>
 
@@ -232,7 +229,9 @@ export default function App() {
           )}
           <div className="row">
             <input ref={inputRef} value={input} onChange={(ev) => setInput(ev.target.value)} disabled={busy}
-              placeholder={pin ? 'Ask about this spot…' : 'Ask about a place, e.g. "Is Kasarani good for a gym?"'} />
+              placeholder={lang === 'sw'
+                ? (pin ? 'Uliza kuhusu eneo hili… (jibu kwa Kiswahili)' : 'Uliza kuhusu eneo, k.m. "Je, Kasarani inafaa kwa gym?"')
+                : (pin ? 'Ask about this spot…' : 'Ask about a place, e.g. "Is Kasarani good for a gym?"')} />
             <button type="submit" disabled={busy || !input.trim()} aria-label="Ask"><Send size={18} /></button>
           </div>
         </form>
