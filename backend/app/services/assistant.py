@@ -29,7 +29,12 @@ from backend.app.services.analyzers import (add_terrain, business_verdict, compu
 from backend.app.services.layers import layer_path, load_dem, load_layer
 from backend.app.services.sam_service import Detection
 
-NAIROBI = (36.65, -1.45, 37.10, -1.15)  # west, south, east, north: where TerraSat has map data today
+AREA = (36.55, -1.55, 37.15, -1.01)  # west, south, east, north: Greater Nairobi, where TerraSat has map data today
+AREA_TOWNS = "Nairobi, Ruiru, Juja, Thika, Kikuyu, Limuru, Ngong, Rongai, Kitengela and Athi River"
+
+
+def in_area(lon: float, lat: float) -> bool:
+    return AREA[0] <= lon <= AREA[2] and AREA[1] <= lat <= AREA[3]
 RIPARIAN_NOTE = ("Riparian reserve: 6-30 m from the highest water mark under the EMCA (Water Quality) "
                  "Regulations 2006; the government enforces 30 m along the Nairobi Rivers (Interior Ministry, May 2024).")
 LANGUAGES = {"en": "English", "sw": "Kiswahili"}
@@ -58,22 +63,30 @@ def name_variants(place: str) -> list[str]:
 
 
 def geocode(place: str, client: Optional[httpx.Client] = None) -> Optional[tuple[float, float, str]]:
-    """(lon, lat, matched name) via Nominatim, limited to Nairobi (usage policy: 1 request a
+    """(lon, lat, matched name) via Nominatim, limited to Greater Nairobi (usage policy: 1 request a
     second, identify the app). Prefers named places (suburbs, estates) over roads or shops."""
     own = client is None
     client = client or httpx.Client(timeout=20, headers={"User-Agent": "TerraSat/0.3 (hackathon)"})
-    w, s, e, n = NAIROBI
+    w, s, e, n = AREA
     try:
         for name in name_variants(place):
             time.sleep(1.1)
             r = client.get("https://nominatim.openstreetmap.org/search",
-                           params={"q": f"{name}, Nairobi, Kenya", "format": "jsonv2", "limit": 5,
+                           params={"q": f"{name}, Kenya", "format": "jsonv2", "limit": 5,
                                    "viewbox": f"{w},{n},{e},{s}", "bounded": 1})
             r.raise_for_status()
             hits = r.json()
             if hits:
                 best = next((h for h in hits if h.get("category") == "place"), hits[0])
                 return float(best["lon"]), float(best["lat"]), best["display_name"]
+        # Not in Greater Nairobi: look across Kenya, so a town outside our map ("Nakuru") isn't swapped for a
+        # street with the same name ("Nakuru Road"); ask() then says it's outside TerraSat's area.
+        time.sleep(1.1)
+        r = client.get("https://nominatim.openstreetmap.org/search",
+                       params={"q": name_variants(place)[0], "countrycodes": "ke", "format": "jsonv2", "limit": 1})
+        r.raise_for_status()
+        if hits := r.json():
+            return float(hits[0]["lon"]), float(hits[0]["lat"]), hits[0]["display_name"]
     finally:
         if own:
             client.close()
@@ -163,7 +176,7 @@ def check_place(db, lon: float, lat: float) -> dict:
     p = load_profile("flood").params
     pad = 0.006
     bounds = (lon - pad, lat - pad, lon + pad, lat + pad)
-    covered = NAIROBI[0] <= lon <= NAIROBI[2] and NAIROBI[1] <= lat <= NAIROBI[3]
+    covered = in_area(lon, lat)
     out: dict = {"lat": lat, "lon": lon, "covered": covered, "flood_risk": None, "surface_water_risk": None,
                  "distance_to_watercourse_m": None, "height_above_watercourse_m": None, "watercourse_source": None,
                  "in_riparian_reserve": None, "riparian_reserve_m": p["riparian_buffer_m"]}
@@ -189,7 +202,7 @@ def check_place(db, lon: float, lat: float) -> dict:
                                  for f in load_layer("flood_history", bounds, pad_deg=0.01)  # placed at neighbourhood
                                  if geo.to_utm(shape(f["geometry"])).distance(here) <= 1500][:5]  # centres, so 1.5 km
     out.update(ground_truth(db, lon, lat))
-    out["notes"] = ([] if covered else ["TerraSat has no flood map data here yet (Nairobi only)."]) + [
+    out["notes"] = ([] if covered else ["TerraSat has no flood map data here yet (Greater Nairobi only)."]) + [
         "Flood risk class: distance to and height above the nearest watercourse, rules checked against "
         "UNOSAT's record of 2024 flood damage. Elevation is a 30 m surface model, so heights are approximate.",
         RIPARIAN_NOTE]
@@ -265,7 +278,7 @@ def _route(message: str, history: list[dict]) -> dict:
     menu = "\n".join(f"- {p.id}: {p.name}. {p.tagline}" for p in list_profiles())
     convo = "\n".join(f"{m.get('role')}: {m.get('text')}" for m in history[-4:])
     out = meta.spark_json(
-        "TerraSat analyses places in Nairobi for people planning to build, buy, rent or open a business. "
+        "TerraSat analyses places in Greater Nairobi for people planning to build, buy, rent or open a business. "
         f"Analyses:\n{menu}\n\nRecent conversation:\n{convo or '(none)'}\nNew message: \"{message}\"\n\n"
         'Return JSON: {"use_case": the best analysis id, or "general" if none fits; "place": the place they name '
         '(estate, road, landmark), or null if they name none ("here" is not a name); "business": the kind of business '
@@ -352,6 +365,46 @@ def highlights(use_case: str, summary: dict, check: Optional[dict], google: Opti
     return out
 
 
+# Swahili for the fixed labels on an answer card (verdict badge and number tiles)
+SW = {"Low flood risk": "Hatari ndogo ya mafuriko", "Medium flood risk": "Hatari ya wastani ya mafuriko",
+      "High flood risk": "Hatari kubwa ya mafuriko", "Sunshine data unavailable": "Data ya jua haipatikani",
+      "Weak sunshine for solar": "Jua hafifu kwa sola", "Good sunshine, no roof at the pin": "Jua zuri, hakuna paa kwenye pini",
+      "Strong opportunity": "Fursa nzuri", "Crowded": "Ushindani mkubwa", "Moderate": "Wastani",
+      "Needs business type": "Taja aina ya biashara", "Dense": "Imejengwa sana", "Low density": "Kuna nafasi ya kujenga",
+      "Medium density": "Imejengwa kiasi", "Outside TerraSat's area": "Nje ya eneo la TerraSat",
+      "Nearest watercourse": "Mto ulio karibu", "Height above it": "Urefu juu ya mto",
+      "In riparian reserve": "Ndani ya hifadhi ya mto", "2024 flood": "Mafuriko ya 2024",
+      "Past floods nearby": "Mafuriko ya awali karibu", "Rainwater collects here": "Maji ya mvua hukusanyika hapa",
+      "Sunshine": "Jua", "Roof at pin": "Paa kwenye pini", "Output": "Uzalishaji", "Payback": "Kurudisha gharama",
+      "Neighbours with panels": "Majirani wenye sola", "Power line": "Laini ya umeme",
+      "Ground coverage": "Eneo lililojengwa", "Buildings per ha": "Majengo kwa hekta",
+      "New since baseline": "Mapya tangu data ya awali", "Floor area ratio (est.)": "Uwiano wa sakafu (makadirio)",
+      "Major road": "Barabara kuu", "Open land": "Ardhi wazi", "Competitors within 500 m": "Washindani ndani ya mita 500",
+      "Their average rating": "Ukadiriaji wao wa wastani", "People nearby (est.)": "Watu karibu (makadirio)",
+      "People per competitor": "Watu kwa kila mshindani", "Anchors nearby": "Vivutio karibu",
+      "Yes": "Ndiyo", "No": "Hapana", "Flooded": "Ilifurika", "Not flooded": "Haikufurika", "Not visible": "Haionekani"}
+
+
+def to_sw(text):
+    """A card label in Swahili; numbers in the solar payback labels are kept."""
+    if not isinstance(text, str):
+        return text
+    if m := re.fullmatch(r"Solar pays back in ~(.+) years", text):
+        return f"Sola inarudisha gharama baada ya miaka ~{m[1]}"
+    if m := re.fullmatch(r"Slow payback \(~(.+) years\)", text):
+        return f"Inachelewa kurudisha gharama (miaka ~{m[1]})"
+    return SW.get(text, text)
+
+
+def card_in(lang: str, reply: dict) -> dict:
+    """The verdict badge and tile labels in the answer's language."""
+    if lang == "sw":
+        if reply.get("verdict"):
+            reply["verdict"] = {**reply["verdict"], "label": to_sw(reply["verdict"]["label"])}
+        reply["highlights"] = [{**h, "label": to_sw(h["label"]), "value": to_sw(h["value"])} for h in reply["highlights"]]
+    return reply
+
+
 # The shape every answer takes, so the apps can show it as a tidy card
 ANSWER_FORMAT = """**Verdict:** one sentence.
 
@@ -361,6 +414,28 @@ ANSWER_FORMAT = """**Verdict:** one sentence.
 
 **Check on the ground**
 - 2 or 3 short, practical checks"""
+ANSWER_FORMAT_SW = """**Uamuzi:** sentensi moja.
+
+**Takwimu muhimu**
+- Kipimo: thamani (andika "makadirio" au "dhana" kwenye mabano inapofaa)
+- mistari 3 hadi 5 kama hii
+
+**Angalia ukiwa eneo hilo**
+- ukaguzi 2 au 3 mfupi wa vitendo"""
+
+
+def outside_area(where: dict, use_case: str, business: Optional[str], lang: str) -> dict:
+    """A place TerraSat has no map data for: say so plainly instead of analysing somewhere else."""
+    name = (where.get("matched") or where["name"]).split(",")[0]
+    reply = (f"Bado hatushughulikii **{name}**. Kwa sasa TerraSat ina data ya ramani kwa Nairobi kubwa: {AREA_TOWNS}. "
+             "Maeneo mengine ya Kenya yanakuja katika toleo lijalo, ambapo data ya ramani itapakuliwa inapohitajika."
+             if lang == "sw" else
+             f"We don't cover **{name}** yet. TerraSat currently has map data for Greater Nairobi: {AREA_TOWNS}. "
+             "The rest of Kenya is coming in the next version, which will download map data on demand.")
+    return card_in(lang, {"reply": reply, "use_case": use_case, "use_case_name": None, "place": where, "business": business,
+                          "audit": None, "check": None, "ground_truth": None,
+                          "verdict": {"label": "Outside TerraSat's area", "tone": "mixed"}, "highlights": [],
+                          "competitors": None, "ask": None, "sources": []})
 
 
 def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Optional[float] = None,
@@ -376,9 +451,11 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
         if hit:
             where = {"name": route["place"], "matched": hit[2], "lon": hit[0], "lat": hit[1], "source": "named"}
     not_found = bool(route["place"]) and where is None
-    if where is None and lat is not None and lon is not None:
+    if where is None and not not_found and lat is not None and lon is not None:  # never swap a named place for the pin
         where = {"name": "the selected spot" if not on_site else "where the person is standing",
                  "lon": lon, "lat": lat, "source": "gps" if on_site else "pin"}
+    if where and not in_area(where["lon"], where["lat"]):
+        return outside_area(where, use_case, route["business"], lang)
     audit = check = google = None
     notes: list[str] = []
     if where and use_case != "general":
@@ -413,11 +490,13 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
     menu = ", ".join(p.name for p in list_profiles())
     convo = "\n".join(f"{m.get('role')}: {m.get('text')}" for m in history[-6:])
     prompt = (
-        "You are TerraSat, an urban planning assistant for Nairobi. People ask about places where they want to build, "
+        "You are TerraSat, an urban planning assistant for Greater Nairobi. People ask about places where they want to build, "
         "buy, rent or open a business.\n"
-        f"Reply in {LANGUAGES.get(lang, 'English')}, under 150 words. Give only the final answer: don't describe "
-        "your searches. Format it in Markdown exactly like this (translate the headings), one item per line:\n"
-        f"{ANSWER_FORMAT}\n"
+        + ("Write the WHOLE reply in Kiswahili, headings included, even though DATA and web pages are in English: "
+           "translate them. " if lang == "sw" else "Reply in English. ")
+        + "Keep it under 150 words. Give only the final answer: don't describe "
+        "your searches. Format it in Markdown exactly like this, one item per line:\n"
+        f"{ANSWER_FORMAT_SW if lang == 'sw' else ANSWER_FORMAT}\n"
         f"{framing}\n"
         "Use only facts from DATA, the conversation, or web pages you open and cite (use the web for laws, prices, "
         "tariffs and recent news). Say plainly when something is an estimate or an assumption.\n"
@@ -432,10 +511,10 @@ def ask(db, message: str, lang: str = "en", lat: Optional[float] = None, lon: Op
     ans = meta.spark(prompt, web_search=True)
     ask_next = (next_question(db, device_id, where["lon"], where["lat"], lang, use_case)
                 if where and on_site and use_case != "general" else None)
-    return {"reply": ans["text"], "use_case": use_case,
+    return card_in(lang, {"reply": ans["text"], "use_case": use_case,
             "use_case_name": load_profile(use_case).name if use_case != "general" else None,
             "place": where, "business": route["business"], "audit": audit, "check": check, "ground_truth": truth,
             "verdict": verdict(use_case, (audit or {}).get("summary"), check, google),
             "highlights": highlights(use_case, (audit or {}).get("summary"), check, google),
             "competitors": google,
-            "ask": ask_next, "sources": ans["citations"]}
+            "ask": ask_next, "sources": ans["citations"]})
