@@ -135,18 +135,24 @@ def load_dem(bounds: tuple[float, float, float, float], pad_deg: float = 0.02) -
     """Elevation around (west, south, east, north), padded so upstream areas
     count when working out where water flows."""
     import rasterio
-    from rasterio.windows import from_bounds
+    from rasterio.merge import merge
     w, s, e, n = bounds[0] - pad_deg, bounds[1] - pad_deg, bounds[2] + pad_deg, bounds[3] + pad_deg
-    for tif in sorted(layer_path("copernicus_dem").glob("*.tif")):
-        with rasterio.open(tif) as src:
-            b = src.bounds
-            if not (b.left <= w and b.right >= e and b.bottom <= s and b.top >= n):
-                continue
-            win = from_bounds(w, s, e, n, src.transform).round_offsets().round_lengths()
-            z = src.read(1, window=win).astype(float)
-            t = src.window_transform(win)
-            return Dem(z, t.c, t.f, t.a, -t.e)
-    return None
+    srcs = [rasterio.open(t) for t in sorted(layer_path("copernicus_dem").glob("*.tif"))]
+    try:  # merged, so a place on the edge between two 1-degree tiles still gets terrain
+        hits = [x for x in srcs if x.bounds.left < e and x.bounds.right > w and x.bounds.bottom < n and x.bounds.top > s]
+        if not hits:
+            return None
+        r, x0, y0 = hits[0].res[0], hits[0].bounds.left, hits[0].bounds.top  # snap to the pixel grid, or merge
+        w, e = x0 + math.floor((w - x0) / r) * r, x0 + math.ceil((e - x0) / r) * r  # leaves an empty edge column
+        n, s = y0 - math.floor((y0 - n) / r) * r, y0 - math.ceil((y0 - s) / r) * r
+        z, t = merge(hits, bounds=(w, s, e, n), nodata=-32768)
+        z = z[0].astype(float)
+        if (z == -32768).any():  # part of the area has no downloaded tile
+            return None
+        return Dem(z, t.c, t.f, t.a, -t.e)
+    finally:
+        for x in srcs:
+            x.close()
 
 
 def load_layers(names: Iterable[str], bounds) -> dict:
