@@ -216,8 +216,9 @@ def test_ask_routes_to_the_right_analysis(client, monkeypatch):
     flood = client.post("/ask", json={"message": "Does it flood?", "lang": "sw", "lat": lat + 15 / 111_320, "lon": lon,
                                       "on_site": True, "device_id": "p1"}).json()
     assert flood["check"]["flood_risk"] == "high" and flood["ask"]["id"] == "flooded_last_season"
-    assert flood["verdict"] == {"label": "High flood risk", "tone": "poor"}
-    assert "Kiswahili" in prompts[1]
+    assert flood["verdict"] == {"label": "Hatari kubwa ya mafuriko", "tone": "poor"}          # asked in Swahili
+    assert {"icon": "reserve", "label": "Ndani ya hifadhi ya mto", "value": "Ndiyo"} in flood["highlights"]
+    assert "Kiswahili" in prompts[1] and "**Uamuzi:**" in prompts[1]
 
     other = client.post("/ask", json={"message": "Will it rain tomorrow?"}).json()
     assert other["use_case"] == "general" and other["audit"] is None and "can analyse" in prompts[2]
@@ -316,3 +317,15 @@ def test_google_daily_cap(monkeypatch):
         assistant.google_competitors("pharmacy", 36.8, -1.29, 500)
     budget = DailyBudget(2)
     assert budget.take() and budget.take() and not budget.take()
+
+
+def test_ask_outside_greater_nairobi_says_so_instead_of_guessing(client, monkeypatch):
+    from backend.app.services import assistant
+    monkeypatch.setattr(assistant.meta, "spark_json", lambda prompt, **kw: {"use_case": "solar_minigrid", "place": "Nakuru town"})
+    monkeypatch.setattr(assistant, "_geocode_cached", lambda place: (36.0800, -0.3031, "Nakuru, Nakuru County, Kenya"))
+    called = []
+    monkeypatch.setattr(assistant, "cached_audit", lambda *a, **kw: called.append(a))
+    monkeypatch.setattr(assistant.meta, "spark", lambda *a, **kw: called.append(a))
+    r = client.post("/ask", json={"message": "Is solar worth it in Nakuru town?", "lat": -1.2833, "lon": 36.8340}).json()
+    assert r["verdict"]["label"] == "Outside TerraSat's area" and r["reply"].startswith("We don't cover **Nakuru** yet") and "next version" in r["reply"]
+    assert r["place"]["source"] == "named" and r["audit"] is None and not called   # no analysis of the Nairobi pin
