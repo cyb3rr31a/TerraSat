@@ -34,8 +34,9 @@ from backend.app.services.audit import PRESETS  # noqa: E402
 from backend.app.services.assistant import AREA, geocode  # noqa: E402
 from backend.app.services.layers import layer_path  # noqa: E402
 
-OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",          # main server
-                 "https://overpass.kumi.systems/api/interpreter"]  # mirror if the main one is busy
+OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",            # main server
+                 "https://overpass.kumi.systems/api/interpreter",    # mirrors if it's busy
+                 "https://overpass.private.coffee/api/interpreter"]
 NAIROBI_BBOX = (AREA[1], AREA[0], AREA[3], AREA[2])  # Greater Nairobi as south, west, north, east
 DEMO_BBOX = (-1.39, 36.77, -1.24, 36.95)     # demo sites only: lighter queries
 
@@ -75,18 +76,26 @@ def overpass(selectors, bbox, out, parts=3):
                 ts, tw = s + i * dy, w + j * dx
                 body = "\n".join(f"  {sel}({ts},{tw},{ts + dy},{tw + dx});" for sel in selectors)
                 query = f"[out:json][timeout:240];\n(\n{body}\n);\n{out};"
-                for url in OVERPASS_URLS:
-                    try:
-                        r = c.post(url, data={"data": query})
-                        r.raise_for_status()
-                        seen.update({(el["type"], el["id"]): el for el in r.json()["elements"]})
-                        break
-                    except (httpx.HTTPError, ValueError) as err:  # busy server or bad JSON
-                        print(f"  {url} failed ({err.__class__.__name__}), trying the next server...")
+                for attempt in range(4):  # busy (429/504) is common: wait longer each round, then try again
+                    for url in OVERPASS_URLS:
+                        try:
+                            r = c.post(url, data={"data": query})
+                            r.raise_for_status()
+                            seen.update({(el["type"], el["id"]): el for el in r.json()["elements"]})
+                            break
+                        except (httpx.HTTPError, ValueError) as err:  # busy server or bad JSON
+                            code = getattr(getattr(err, "response", None), "status_code", err.__class__.__name__)
+                            print(f"  {url.split('/')[2]} busy ({code})")
+                    else:
+                        wait = 30 * (attempt + 1)
+                        print(f"  all servers busy, waiting {wait} s...")
+                        time.sleep(wait)
+                        continue
+                    break
                 else:
                     raise RuntimeError("all Overpass servers are busy - try again later")
                 print(f"  tile {i * parts + j + 1}/{parts * parts}: {len(seen)} so far")
-                time.sleep(2)  # be gentle with the shared Overpass servers
+                time.sleep(5)  # be gentle with the shared Overpass servers
     return {"elements": list(seen.values())}
 
 
