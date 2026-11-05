@@ -275,3 +275,7 @@ Planned work is tracked as GitHub issues, grouped into milestones **M1 Live pipe
 ## Responsible use
 
 TerraSat's flood outputs are **information to help people decide and protect themselves**: where to buy or build, early warning, drains to clear. Risk describes a place, never the people who live there, and the outputs are not meant for identifying homes to demolish. The chat never calls a place "safe" and tells buyers to confirm the title and riparian boundary with the authorities and to visit after heavy rain. Reports about crime or safety are deliberately not collected, because they stigmatise neighbourhoods. Detection counts are estimates from imagery and should be checked in the field before decisions that affect people.
+
+## License
+
+The code is released under the [MIT License](LICENSE). Map data keeps its own licence (see Data and attribution): OpenStreetMap data is ODbL, the UNOSAT 2024 flood mapping is CC BY-SA, and Google Maps results are shown under Google's terms and never stored.
